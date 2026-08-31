@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source_dir="$root/bosectl"
+legacy_source_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bosectl"
+bin_dir="${HOME}/.local/bin"
+
+fail() {
+  printf 'omabose setup: %s\n' "$1" >&2
+  exit 1
+}
+
+[[ -x "$source_dir/bosectl" ]] || fail "bundled bosectl entry point is missing"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+
+# Validate that at least one Python has Bluetooth socket support (required on Linux).
+# mise/pyenv builds without bluez headers produce socket without AF_BLUETOOTH.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  if ! python3 -c 'import socket; raise SystemExit(0 if hasattr(socket, "AF_BLUETOOTH") and hasattr(socket, "BTPROTO_RFCOMM") else 1)' 2>/dev/null; then
+    if /usr/bin/python3 -c 'import socket; raise SystemExit(0 if hasattr(socket, "AF_BLUETOOTH") and hasattr(socket, "BTPROTO_RFCOMM") else 1)' 2>/dev/null; then
+      printf 'omabose setup: warning: default python3 lacks AF_BLUETOOTH (shimmed python without bluez); bosectl will auto-use /usr/bin/python3\n' >&2
+    else
+      fail "no Python with AF_BLUETOOTH/BTPROTO_RFCOMM found. Install python with BlueZ support (pacman -S python bluez) or rebuild shimmed python after installing bluez headers"
+    fi
+  fi
+fi
+
+mkdir -p "$bin_dir"
+target="$bin_dir/bosectl"
+if [[ -e "$target" || -L "$target" ]]; then
+  expected=$(readlink -f "$source_dir/bosectl")
+  existing=$(readlink -f "$target" 2>/dev/null || true)
+  if [[ "$existing" != "$expected" ]]; then
+    legacy=$(readlink -f "$legacy_source_dir/bosectl" 2>/dev/null || true)
+    [[ -L "$target" && "$existing" == "$legacy" ]] \
+      || fail "refusing to replace an existing executable at $target"
+  fi
+fi
+ln -sfn -- "$source_dir/bosectl" "$target"
+
+printf 'bosectl is installed at %s/bosectl\n' "$bin_dir"

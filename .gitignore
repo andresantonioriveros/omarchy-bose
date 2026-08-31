@@ -1,0 +1,3 @@
+.pytest_cache/
+bosectl/**/__pycache__/
+bosectl/python/.pytest_cache/

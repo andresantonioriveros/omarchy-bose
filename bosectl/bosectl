@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""bosectl — Control headphones over BMAP.
+
+Works both as a standalone script (no install needed) and as an installed
+entry point via `pip install pybmap`.
+"""
+import os
+import sys
+
+# On Linux, RFCOMM requires socket.AF_BLUETOOTH. mise/pyenv builds often lack
+# BlueZ headers and produce a socket module without it, causing
+# AttributeError at transport.py:238. Re-exec with a system Python that has
+# Bluetooth support so the plugin works on any machine regardless of PATH.
+if sys.platform != "darwin":
+    try:
+        import socket as _sock_check
+        _has_bt = hasattr(_sock_check, "AF_BLUETOOTH") and hasattr(_sock_check, "BTPROTO_RFCOMM")
+    except Exception:
+        _has_bt = False
+    if not _has_bt:
+        if not os.environ.get("_BOSECTL_REEXEC"):
+            os.environ["_BOSECTL_REEXEC"] = "1"
+            for _cand in ("/usr/bin/python3", "/usr/bin/python", "/bin/python3"):
+                try:
+                    os.execv(_cand, [_cand] + sys.argv)
+                except OSError:
+                    continue
+        print(
+            "bosectl: no Python with AF_BLUETOOTH/BTPROTO_RFCOMM found. "
+            "Install system python with BlueZ support (pacman -S python bluez) "
+            "or rebuild your shimmed python after installing bluez headers.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+# Prefer the bundled runtime over any unrelated installed pybmap package.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "python"))
+
+from pybmap.cli import main
+
+main()
