@@ -15,7 +15,9 @@ function emptyStatus() {
     modeOptions: [],
     cnc: -1,
     cncMax: 0,
-    cncAvailable: false
+    cncAvailable: false,
+    eqAvailable: false,
+    eqBands: []
   }
 }
 
@@ -53,6 +55,7 @@ function parseBridgeStatus(raw) {
   var components = battery.components || {}
   var mode = payload.mode || {}
   var noise = payload.noiseControl || {}
+  var equalizer = payload.equalizer || {}
 
   status.address = String(device.address || "").toUpperCase()
   status.deviceType = String(device.type || "")
@@ -80,8 +83,94 @@ function parseBridgeStatus(raw) {
   status.cncAvailable = noise.available === true
   status.cnc = status.cncAvailable ? percentage(noise.level) : -1
   status.cncMax = status.cncAvailable ? Math.max(0, Math.round(Number(noise.maximum) || 0)) : 0
+  status.eqBands = equalizer.available === true ? parseEqualizerBands(equalizer.bands) : []
+  status.eqAvailable = status.eqBands.length === 3
   status.reachable = status.address !== "" && status.deviceType !== "" && status.battery >= 0
   return status
+}
+
+function parseEqualizerBands(values) {
+  if (!Array.isArray(values) || values.length !== 3) return []
+  var expected = ["bass", "mid", "treble"]
+  var byId = {}
+  for (var i = 0; i < values.length; i++) {
+    var source = values[i] || {}
+    var id = String(source.id || "").toLowerCase()
+    var minimum = Number(source.minimum)
+    var maximum = Number(source.maximum)
+    var value = Number(source.value)
+    if (expected.indexOf(id) < 0 || byId[id]
+        || !isFinite(minimum) || Math.round(minimum) !== minimum
+        || !isFinite(maximum) || Math.round(maximum) !== maximum
+        || !isFinite(value) || Math.round(value) !== value
+        || minimum > maximum || value < minimum || value > maximum) return []
+    byId[id] = {
+      id: id,
+      label: cleanText(source.label) || modeLabel(id),
+      minimum: minimum,
+      maximum: maximum,
+      value: value
+    }
+  }
+
+  var bands = []
+  for (var b = 0; b < expected.length; b++) {
+    if (!byId[expected[b]]) return []
+    bands.push(byId[expected[b]])
+  }
+  return bands
+}
+
+function equalizerPresets() {
+  return [
+    { id: "bassBoost", label: "Bass Boost", values: [8, 0, 0] },
+    { id: "bassReducer", label: "Bass Reducer", values: [-8, -2, 0] },
+    { id: "trebleBoost", label: "Treble Boost", values: [0, 0, 6] },
+    { id: "trebleReducer", label: "Treble Reducer", values: [0, -2, -6] }
+  ]
+}
+
+function equalizerValues(bands) {
+  var values = []
+  for (var i = 0; bands && i < bands.length; i++)
+    values.push(Math.round(Number(bands[i].value)))
+  return values
+}
+
+function equalizerValuesMatch(bands, values) {
+  if (!bands || bands.length !== 3 || !values || values.length !== 3) return false
+  for (var i = 0; i < 3; i++) {
+    if (Math.round(Number(bands[i].value)) !== Math.round(Number(values[i]))) return false
+  }
+  return true
+}
+
+function equalizerBandsWithValues(bands, values) {
+  if (!bands || bands.length !== 3 || !values || values.length !== 3) return bands || []
+  var result = []
+  for (var i = 0; i < bands.length; i++) {
+    result.push({
+      id: bands[i].id,
+      label: bands[i].label,
+      minimum: bands[i].minimum,
+      maximum: bands[i].maximum,
+      value: Math.round(Number(values[i]))
+    })
+  }
+  return result
+}
+
+function equalizerPresetId(bands) {
+  var presets = equalizerPresets()
+  for (var i = 0; i < presets.length; i++) {
+    if (equalizerValuesMatch(bands, presets[i].values)) return presets[i].id
+  }
+  return ""
+}
+
+function formatEqualizerValue(value) {
+  var number = Math.round(Number(value) || 0)
+  return number > 0 ? "+" + number : String(number)
 }
 
 function numberOrUnknown(value) {
@@ -219,7 +308,7 @@ function modeIconVariant(id) {
   return "mode"
 }
 
-function cursorRows(devices, modes, vendorAvailable, cncAvailable) {
+function cursorRows(devices, modes, vendorAvailable, cncAvailable, eqAvailable) {
   var rows = []
   if (devices && devices.length > 1) {
     for (var i = 0; i < devices.length; i++)
@@ -229,6 +318,7 @@ function cursorRows(devices, modes, vendorAvailable, cncAvailable) {
     for (var m = 0; modes && m < modes.length; m++)
       rows.push({ key: "mode:" + modes[m].id, kind: "mode", id: modes[m].id, index: m })
     if (cncAvailable) rows.push({ key: "cnc", kind: "cnc", id: "cnc", index: -1 })
+    if (eqAvailable) rows.push({ key: "eq", kind: "eq", id: "eq", index: -1 })
   }
   return rows
 }
