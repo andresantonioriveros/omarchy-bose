@@ -19,6 +19,7 @@ Item {
   property string vendorState: "idle"
   property string pendingMode: ""
   property int pendingCnc: -1
+  property var pendingEq: []
   property int pendingVerificationAttempts: 0
   property string vendorError: ""
   property string actionStatus: ""
@@ -50,11 +51,17 @@ Item {
   readonly property int displayedCnc: pendingCnc >= 0
     ? pendingCnc : (vendorMatchesSelection ? vendorStatus.cnc : -1)
   readonly property var modeOptions: vendorMatchesSelection ? vendorStatus.modeOptions : []
+  readonly property var displayedEqBands: pendingEq.length === 3
+    ? Model.equalizerBandsWithValues(vendorStatus.eqBands, pendingEq)
+    : (vendorMatchesSelection ? vendorStatus.eqBands : [])
+  readonly property var eqPresets: Model.equalizerPresets()
+  readonly property string selectedEqPreset: Model.equalizerPresetId(displayedEqBands)
   readonly property var batteryRows: Model.batteryRows(selectedDevice, vendorStatus)
   readonly property bool vendorAvailable: vendorMatchesSelection
   readonly property bool vendorLoading: vendorState === "loading"
   readonly property bool vendorStale: vendorState === "stale"
   readonly property bool cncAvailable: vendorMatchesSelection && vendorStatus.cncAvailable
+  readonly property bool eqAvailable: vendorMatchesSelection && vendorStatus.eqAvailable
   readonly property string bridgePath: decodeURIComponent(
     Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//, ""))
   readonly property int pollIntervalMs: {
@@ -128,11 +135,12 @@ Item {
   function clearPending() {
     pendingMode = ""
     pendingCnc = -1
+    pendingEq = []
     pendingVerificationAttempts = 0
   }
 
   function retryPendingChange() {
-    if (pendingMode === "" && pendingCnc < 0) {
+    if (pendingMode === "" && pendingCnc < 0 && pendingEq.length !== 3) {
       pendingVerificationAttempts = 0
       return
     }
@@ -210,6 +218,29 @@ Item {
     if (!cncAvailable) return
     var level = Math.max(0, Math.min(vendorStatus.cncMax, Math.round(value)))
     if (runAction(["cnc", String(level)], "Cancellation: " + level + "/" + vendorStatus.cncMax)) pendingCnc = level
+  }
+
+  function setEqualizer(values, successText) {
+    if (!eqAvailable || !values || values.length !== 3) return false
+    var normalized = []
+    for (var i = 0; i < 3; i++) {
+      var value = Number(values[i])
+      var band = vendorStatus.eqBands[i]
+      if (!isFinite(value) || Math.round(value) !== value
+          || value < band.minimum || value > band.maximum) return false
+      normalized.push(value)
+    }
+    if (Model.equalizerValuesMatch(displayedEqBands, normalized)) return true
+    var message = successText || "Equalizer updated"
+    if (!runAction([
+      "eq", String(normalized[0]), String(normalized[1]), String(normalized[2])
+    ], message)) return false
+    pendingEq = normalized
+    return true
+  }
+
+  function resetEqualizer() {
+    return setEqualizer([0, 0, 0], "Equalizer reset")
   }
 
   function clearActionStatus() {
@@ -359,6 +390,11 @@ Item {
           if (root.pendingCnc >= 0 && parsed.cnc === root.pendingCnc)
             root.pendingCnc = -1
           else if (root.pendingCnc >= 0) pendingMismatch = true
+          if (root.pendingEq.length === 3
+              && parsed.eqAvailable
+              && Model.equalizerValuesMatch(parsed.eqBands, root.pendingEq))
+            root.pendingEq = []
+          else if (root.pendingEq.length === 3) pendingMismatch = true
 
           if (pendingMismatch) root.retryPendingChange()
           else root.pendingVerificationAttempts = 0

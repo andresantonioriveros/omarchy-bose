@@ -2,10 +2,14 @@
 
 A Bose QuietComfort widget for the Omarchy Quattro bar. It shows Bluetooth
 connection and battery state, with Bose listening-mode and noise-control actions
-through the bundled `bosectl` implementation.
+and a three-band equalizer through the bundled `bosectl` implementation.
 
 <p align="center">
-  <img src="preview.png" width="390" alt="Omabose 0.3.0 panel with two connected Bose devices, earbud battery levels, listening modes, and noise control" />
+  <img src="preview.png" width="390" alt="Omabose main panel with two Bose devices, battery levels, listening modes, and noise control" />
+</p>
+
+<p align="center">
+  <img src="preview-equalizer.png" width="390" alt="Omabose 0.3.2 bar icon and equalizer with Bass, Mid, and Treble controls and four presets" />
 </p>
 
 The plugin does not use Bose cloud or account services.
@@ -51,7 +55,10 @@ recorded in `bosectl/UPSTREAM.md`, then publish a new plugin version.
 ## Usage
 
 Open the Bose widget from the bar. Select a paired device to inspect its
-battery, listening modes, and noise-cancellation level.
+battery, listening modes, and noise-cancellation level. Devices that expose
+equalizer controls show an `EQ` option at the bottom of the panel. It opens a
+dedicated Bass, Mid, and Treble curve with draggable handles, Reset, and the
+four Bose presets: Bass Boost, Bass Reducer, Treble Boost, and Treble Reducer.
 
 The panel selects bundled `bosectl` configurations for these device families:
 
@@ -66,7 +73,10 @@ The panel selects bundled `bosectl` configurations for these device families:
 Available controls depend on each device configuration and its verified BMAP
 capabilities. QuietComfort 45 support is inherited and has not been validated
 on physical hardware. QuietComfort Ultra Earbuds 2 report separate left, right,
-and case battery rows through vendor BMAP readings.
+and case battery rows through vendor BMAP readings. Equalizer reads and writes
+have been physically verified on QuietComfort Ultra Headphones 2 and
+QuietComfort Ultra Earbuds 2. QC35 and QuietComfort Headphones (`prince`) do not
+advertise the BMAP equalizer feature, so the option remains hidden for them.
 
 Device controls come from the resolved runtime configuration. Unsupported Bose
 products remain visible when paired but show a specific unsupported-device

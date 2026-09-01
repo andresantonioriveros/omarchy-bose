@@ -24,6 +24,13 @@ PRODUCT_RE = re.compile(
     r"Modalias:\s*bluetooth:v[0-9A-Fa-f]{4}p([0-9A-Fa-f]{4})"
 )
 CONNECTION_RETRY_DELAYS = (0.5, 1.0, 1.5)
+EQ_BANDS = (
+    (0, "bass", "Bass"),
+    (1, "mid", "Mid"),
+    (2, "treble", "Treble"),
+)
+EQ_MINIMUM = -10
+EQ_MAXIMUM = 10
 
 
 def resolve_device(mac):
@@ -100,6 +107,50 @@ def mode_options(device):
     return options
 
 
+def equalizer_bands(device):
+    """Return the three validated EQ bands in stable display order."""
+    if not device.has_feature("eq"):
+        raise BmapError("Equalizer is not supported by this device")
+
+    by_id = {}
+    for band in device.eq():
+        band_id = int(band.band_id)
+        if band_id in by_id:
+            raise BmapError("Equalizer returned a duplicate band")
+        by_id[band_id] = band
+    if len(by_id) != len(EQ_BANDS):
+        raise BmapError("Equalizer returned unexpected bands")
+
+    normalized = []
+    for band_id, name, label in EQ_BANDS:
+        band = by_id.get(band_id)
+        if band is None:
+            raise BmapError("Equalizer did not return all three bands")
+        minimum = max(int(band.min_val), EQ_MINIMUM)
+        maximum = min(int(band.max_val), EQ_MAXIMUM)
+        current = int(band.current)
+        if minimum > maximum or current < minimum or current > maximum:
+            raise BmapError("Equalizer returned invalid band values")
+        normalized.append({
+            "id": name,
+            "label": label,
+            "minimum": minimum,
+            "maximum": maximum,
+            "value": current,
+        })
+    return normalized
+
+
+def equalizer_status(device):
+    if not device.has_feature("eq"):
+        return {"available": False, "bands": []}
+    try:
+        bands = equalizer_bands(device)
+    except (BmapError, TypeError, ValueError):
+        return {"available": False, "bands": []}
+    return {"available": True, "bands": bands}
+
+
 def panel_status(device, identity, mac):
     """Read only the status fields rendered by the panel."""
     battery = device.battery_status()
@@ -149,6 +200,7 @@ def panel_status(device, identity, mac):
             "level": cancellation,
             "maximum": cnc_max,
         },
+        "equalizer": equalizer_status(device),
     }
 
 
@@ -170,6 +222,20 @@ def set_cancellation(device, level):
     device.set_cnc(maximum - level)
 
 
+def set_equalizer(device, bass, mid, treble):
+    bands = equalizer_bands(device)
+    values = {"bass": bass, "mid": mid, "treble": treble}
+    for band in bands:
+        value = values[band["id"]]
+        if value < band["minimum"] or value > band["maximum"]:
+            raise ValueError(
+                "%s must be %d-%d" % (
+                    band["label"], band["minimum"], band["maximum"]
+                )
+            )
+    device.set_eq(bass, mid, treble)
+
+
 def argument_parser():
     parser = argparse.ArgumentParser(description="Omabose panel bridge")
     parser.add_argument("--mac", required=True, help="selected Bluetooth address")
@@ -181,6 +247,11 @@ def argument_parser():
 
     cnc = commands.add_parser("cnc")
     cnc.add_argument("level", type=int)
+
+    equalizer = commands.add_parser("eq")
+    equalizer.add_argument("bass", type=int)
+    equalizer.add_argument("mid", type=int)
+    equalizer.add_argument("treble", type=int)
     return parser
 
 
@@ -195,6 +266,8 @@ def main(argv=None):
                 set_mode(device, args.name)
             elif args.command == "cnc":
                 set_cancellation(device, args.level)
+            elif args.command == "eq":
+                set_equalizer(device, args.bass, args.mid, args.treble)
     except (BmapError, OSError, ValueError) as error:
         print("Omabose: %s" % error, file=sys.stderr)
         return 1

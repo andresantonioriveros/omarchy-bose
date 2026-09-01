@@ -6,7 +6,7 @@ import pytest
 
 import bridge
 from pybmap.errors import BmapConnectionError, BmapError
-from pybmap.types import BatteryReading, BatteryStatus
+from pybmap.types import BatteryReading, BatteryStatus, EqBand
 
 
 def bluez_info(product_id="4082", bmap=True):
@@ -145,6 +145,7 @@ def test_panel_status_is_lean_structured_snapshot():
     assert status["mode"]["currentId"] == ""
     assert status["mode"]["currentLabel"] == "My\nCommute"
     assert status["noiseControl"] == {"available": True, "level": 7, "maximum": 10}
+    assert status["equalizer"] == {"available": False, "bands": []}
     assert json.loads(json.dumps(status))["mode"]["currentLabel"] == "My\nCommute"
 
 
@@ -161,6 +162,122 @@ def test_panel_status_hides_unresolved_mode_index():
 
     assert status["mode"]["currentId"] == ""
     assert status["mode"]["currentLabel"] == ""
+
+
+class EqDevice:
+    def __init__(self, bands=None):
+        self.bands = bands or [
+            EqBand(2, "Treble", -10, 10, 3),
+            EqBand(0, "Bass", -10, 10, -2),
+            EqBand(1, "Mid", -10, 10, 0),
+        ]
+        self.values = None
+
+    def has_feature(self, name):
+        return name == "eq"
+
+    def eq(self):
+        return self.bands
+
+    def set_eq(self, bass, mid, treble):
+        self.values = (bass, mid, treble)
+
+
+def test_equalizer_status_normalizes_band_order_and_labels():
+    assert bridge.equalizer_status(EqDevice()) == {
+        "available": True,
+        "bands": [
+            {"id": "bass", "label": "Bass", "minimum": -10, "maximum": 10, "value": -2},
+            {"id": "mid", "label": "Mid", "minimum": -10, "maximum": 10, "value": 0},
+            {"id": "treble", "label": "Treble", "minimum": -10, "maximum": 10, "value": 3},
+        ],
+    }
+
+
+def test_equalizer_status_rejects_incomplete_response():
+    device = EqDevice([EqBand(0, "Bass", -10, 10, 0)])
+
+    assert bridge.equalizer_status(device) == {"available": False, "bands": []}
+
+
+@pytest.mark.parametrize(
+    "bands",
+    [
+        [
+            EqBand(0, "Bass", -10, 10, 0),
+            EqBand(0, "Bass", -10, 10, 0),
+            EqBand(2, "Treble", -10, 10, 0),
+        ],
+        [
+            EqBand(0, "Bass", -10, 10, 0),
+            EqBand(1, "Mid", -10, 10, 0),
+            EqBand(2, "Treble", -10, 10, 0),
+            EqBand(3, "Extra", -10, 10, 0),
+        ],
+        [
+            EqBand(0, "Bass", -10, 10, 11),
+            EqBand(1, "Mid", -10, 10, 0),
+            EqBand(2, "Treble", -10, 10, 0),
+        ],
+    ],
+)
+def test_equalizer_status_rejects_invalid_band_sets(bands):
+    assert bridge.equalizer_status(EqDevice(bands)) == {
+        "available": False,
+        "bands": [],
+    }
+
+
+def test_equalizer_status_limits_values_to_writable_range():
+    device = EqDevice([
+        EqBand(0, "Bass", -20, 20, -10),
+        EqBand(1, "Mid", -20, 20, 0),
+        EqBand(2, "Treble", -20, 20, 10),
+    ])
+
+    status = bridge.equalizer_status(device)
+
+    assert status["available"] is True
+    assert [(band["minimum"], band["maximum"]) for band in status["bands"]] == [
+        (-10, 10),
+        (-10, 10),
+        (-10, 10),
+    ]
+
+
+def test_set_equalizer_validates_reported_band_ranges():
+    device = EqDevice()
+
+    bridge.set_equalizer(device, -8, -2, 0)
+
+    assert device.values == (-8, -2, 0)
+    with pytest.raises(ValueError, match="Bass must be -10-10"):
+        bridge.set_equalizer(device, -11, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ((11, 0, 0), "Bass must be -10-10"),
+        ((0, -11, 0), "Mid must be -10-10"),
+        ((0, 0, 11), "Treble must be -10-10"),
+    ],
+)
+def test_set_equalizer_rejects_each_out_of_range_band(values, message):
+    device = EqDevice()
+
+    with pytest.raises(ValueError, match=message):
+        bridge.set_equalizer(device, *values)
+
+    assert device.values is None
+
+
+def test_equalizer_arguments_require_three_integers():
+    args = bridge.argument_parser().parse_args([
+        "--mac", "AA:BB:CC:DD:EE:FF", "eq", "-8", "-2", "0"
+    ])
+
+    assert (args.bass, args.mid, args.treble) == (-8, -2, 0)
 
 
 class ModeDevice:

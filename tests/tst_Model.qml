@@ -25,7 +25,15 @@ TestCase {
           { id: "aware", label: "Aware", detail: "Transparency" }
         ]
       },
-      noiseControl: { available: true, level: 7, maximum: 10 }
+      noiseControl: { available: true, level: 7, maximum: 10 },
+      equalizer: {
+        available: true,
+        bands: [
+          { id: "bass", label: "Bass", minimum: -10, maximum: 10, value: -2 },
+          { id: "mid", label: "Mid", minimum: -10, maximum: 10, value: 0 },
+          { id: "treble", label: "Treble", minimum: -10, maximum: 10, value: 2 }
+        ]
+      }
     }
     for (var key in overrides || {}) payload[key] = overrides[key]
     return JSON.stringify(payload)
@@ -46,6 +54,10 @@ TestCase {
     compare(status.modeOptions.length, 2)
     compare(status.cnc, 7)
     compare(status.cncMax, 10)
+    verify(status.eqAvailable)
+    compare(status.eqBands.length, 3)
+    compare(status.eqBands[0].id, "bass")
+    compare(status.eqBands[0].value, -2)
   }
 
   function test_parseBridgeStatusSanitizesCustomMode() {
@@ -65,6 +77,55 @@ TestCase {
       failed = true
     }
     verify(failed)
+  }
+
+  function test_parseBridgeStatusIgnoresMalformedEqualizer() {
+    var status = Model.parseBridgeStatus(bridgePayload({
+      equalizer: {
+        available: true,
+        bands: [
+          { id: "bass", minimum: -10, maximum: 10, value: 0 },
+          { id: "bass", minimum: -10, maximum: 10, value: 0 },
+          { id: "treble", minimum: -10, maximum: 10, value: 0 }
+        ]
+      }
+    }))
+
+    verify(status.reachable)
+    verify(!status.eqAvailable)
+    compare(status.eqBands.length, 0)
+  }
+
+  function test_parseBridgeStatusAccepts03PayloadWithoutEqualizer() {
+    var payload = JSON.parse(bridgePayload())
+    delete payload.equalizer
+
+    var status = Model.parseBridgeStatus(JSON.stringify(payload))
+
+    verify(status.reachable)
+    verify(!status.eqAvailable)
+    compare(status.eqBands.length, 0)
+  }
+
+  function test_equalizerPresetsMatchOfficialValues() {
+    var presets = Model.equalizerPresets()
+
+    compare(presets.length, 4)
+    compare(presets[0].id, "bassBoost")
+    compare(presets[0].values.join(","), "8,0,0")
+    compare(presets[1].values.join(","), "-8,-2,0")
+    compare(presets[2].values.join(","), "0,0,6")
+    compare(presets[3].values.join(","), "0,-2,-6")
+  }
+
+  function test_equalizerHelpersApplyAndRecognizeValues() {
+    var status = Model.parseBridgeStatus(bridgePayload())
+    var applied = Model.equalizerBandsWithValues(status.eqBands, [-8, -2, 0])
+
+    compare(Model.equalizerPresetId(applied), "bassReducer")
+    compare(Model.equalizerValues(applied).join(","), "-8,-2,0")
+    compare(Model.formatEqualizerValue(3), "+3")
+    compare(Model.formatEqualizerValue(-2), "-2")
   }
 
   function test_deviceRowsFilterAndSortKnownBoseDevices() {
@@ -161,12 +222,13 @@ TestCase {
   function test_cursorRowsOnlyContainVisibleControls() {
     var devices = [{ address: "AA:BB:CC:DD:EE:FF" }]
     var modes = [{ id: "quiet" }, { id: "aware" }]
-    var rows = Model.cursorRows(devices, modes, true, true)
+    var rows = Model.cursorRows(devices, modes, true, true, true)
 
-    compare(rows.length, 3)
+    compare(rows.length, 4)
     compare(rows[0].key, "mode:quiet")
     compare(rows[1].key, "mode:aware")
     compare(rows[2].key, "cnc")
+    compare(rows[3].key, "eq")
     compare(Model.rowIndex(rows, "mode:aware"), 1)
   }
 
@@ -175,7 +237,7 @@ TestCase {
       { address: "AA:BB:CC:DD:EE:01" },
       { address: "AA:BB:CC:DD:EE:02" }
     ]
-    var rows = Model.cursorRows(devices, [], false, false)
+    var rows = Model.cursorRows(devices, [], false, false, false)
 
     compare(rows.length, 2)
     compare(rows[0].key, "device:AA:BB:CC:DD:EE:01")
