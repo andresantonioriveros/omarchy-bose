@@ -181,6 +181,23 @@ TestCase {
     compare(rows[0].key, "device:AA:BB:CC:DD:EE:01")
   }
 
+  function test_deviceOrderDoesNotChangeWithConnectionState() {
+    var devices = [
+      { address: "AA:BB:CC:DD:EE:01", label: "Z Headphones", earbuds: false, connected: true },
+      { address: "AA:BB:CC:DD:EE:02", label: "A Earbuds", earbuds: true, connected: false }
+    ]
+    var initial = Model.sortDevices(devices)
+
+    devices[0].connected = false
+    devices[1].connected = true
+    var updated = Model.sortDevices(devices)
+
+    compare(initial[0].address, "AA:BB:CC:DD:EE:01")
+    compare(initial[1].address, "AA:BB:CC:DD:EE:02")
+    compare(updated[0].address, initial[0].address)
+    compare(updated[1].address, initial[1].address)
+  }
+
   function test_cleanErrorRemovesBridgePrefix() {
     compare(Model.errorForProcess("Omabose: device unavailable\n"), "device unavailable")
   }

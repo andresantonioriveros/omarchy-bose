@@ -132,8 +132,9 @@ function deviceSnapshot(device) {
 
 function sortDevices(devices) {
   return devices.slice().sort(function(a, b) {
-    if (a.connected !== b.connected) return a.connected ? -1 : 1
-    return a.label.localeCompare(b.label)
+    if (a.earbuds !== b.earbuds) return a.earbuds ? 1 : -1
+    var labelOrder = a.label.localeCompare(b.label)
+    return labelOrder !== 0 ? labelOrder : a.address.localeCompare(b.address)
   })
 }
 
