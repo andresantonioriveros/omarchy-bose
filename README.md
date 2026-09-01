@@ -5,7 +5,7 @@ connection and battery state, with Bose listening-mode and noise-control actions
 through the bundled `bosectl` implementation.
 
 <p align="center">
-  <img src="preview.png" width="360" alt="Bose QuietComfort Ultra 2 Earbuds panel" />
+  <img src="preview.png" width="390" alt="Omabose 0.3.0 panel with two connected Bose devices, earbud battery levels, listening modes, and noise control" />
 </p>
 
 The plugin does not use Bose cloud or account services.
