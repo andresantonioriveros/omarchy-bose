@@ -13,9 +13,10 @@ level. Case charging is intentionally not exposed because `[2.5]` tracks
 earbud seating rather than charger state.
 
 The vendored `python/pybmap`, `python/tests`, and EDITH battery fixture are
-copied from that commit. The plugin keeps one local launcher overlay: it
-prepends this directory's bundled `python/` path so an unrelated system
-`pybmap` installation cannot take precedence when the setup symlink is used.
+copied from that commit. The plugin keeps one local launcher overlay that
+prepends this directory's bundled `python/` path. Panel-specific product
+resolution, JSON output, and action routing live outside the vendored copy in
+the repository-root `bridge.py`.
 
 The original MIT license is included in this directory. The runtime has no
 third-party dependencies beyond Python 3 and the system Bluetooth stack.

@@ -49,16 +49,16 @@ component ID `0`. The component IDs remain the source of truth for the Right,
 Left, and Case rows; the ID `4` value is used only for the generic aggregate
 `Battery` line.
 
-## Status Flow
+## Panel Status Flow
 
-The current `bosectl status` command performs these operations:
+The panel bridge performs these operations:
 
-1. `dev.status()` reads `[2.2]` once and keeps the aggregate and component
-   records in one battery snapshot.
-2. The CLI prints the aggregate `Battery` line, followed by known component
-   lines in configured order: `Right`, `Left`, and `Case`.
-3. Omabose runs that command with `BOSE_MAC` and `BMAP_DEVICE` and parses the
-   labelled lines into `Model.parseStatus()`.
+1. `bridge.py` resolves the selected BlueZ product ID to an explicit device
+   configuration.
+2. `dev.battery_status()` reads `[2.2]` once and keeps the aggregate and
+   component records in one battery snapshot.
+3. The bridge emits versioned JSON with aggregate, Right, Left, and Case values;
+   `Model.parseBridgeStatus()` validates that contract.
 
 The single response is the source of truth for both the aggregate value and
 the component map, avoiding inconsistent values from back-to-back reads.
@@ -68,7 +68,7 @@ Implementation references:
 - [`qc_ultra2_earbuds.py`](../bosectl/python/pybmap/devices/qc_ultra2_earbuds.py)
 - [`parsers.py`](../bosectl/python/pybmap/devices/parsers.py)
 - [`connection.py`](../bosectl/python/pybmap/connection.py)
-- [`cli.py`](../bosectl/python/pybmap/cli.py)
+- [`bridge.py`](../bridge.py)
 - [`Model.js`](../Model.js)
 - [`Service.qml`](../Service.qml)
 

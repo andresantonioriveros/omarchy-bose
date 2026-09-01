@@ -14,7 +14,6 @@ The plugin does not use Bose cloud or account services.
 
 ```bash
 omarchy plugin add https://github.com/andresantonioriveros/omarchy-bose.git --enable
-"$HOME/.config/omarchy/plugins/io.github.andresariveros.omabose/setup"
 ```
 
 The command clones the current repository into the user-owned Omarchy plugin
@@ -29,33 +28,25 @@ omarchy bar move io.github.andresariveros.omabose --section right
 
 - Omarchy Quattro with the Omarchy shell and Quickshell Bluetooth support.
 - BlueZ and a Bose device paired through the system Bluetooth tools.
-- Python 3 and RFCOMM support for the required `bosectl` control path.
+- System Python 3 with RFCOMM support.
 
-## Install bosectl
+## Bundled runtime
 
-Run the setup script after installing the plugin. This is required for the
-widget to read vendor status and expose its controls:
+The plugin executes its repository-owned Python bridge directly with
+`/usr/bin/python3`. It requires no elevated privileges, system configuration
+changes, package installation, commands in `PATH`, or external downloads. The
+bridge resolves the selected device's BlueZ product ID against the bundled
+catalog and refuses unknown or unsupported products instead of guessing a
+protocol configuration.
 
-```bash
-"$HOME/.config/omarchy/plugins/io.github.andresariveros.omabose/setup"
-```
-
-The script links the repository-owned `bosectl` implementation into
-`~/.local/bin/bosectl`. It does not use `sudo`, modify system configuration,
-install packages, or download external code. The bundled source is based on
-merged `main` commit
+The bundled `pybmap` source is based on merged `main` commit
 [`c816a89`](https://github.com/andresantonioriveros/bosectl/commit/c816a89c7b7ac293b3b27a5462c9b2e74dddb566)
 and includes the QuietComfort Ultra Earbuds (2nd Gen) support required for
 separate left, right, and case battery readings. Its original MIT license is
 included at `bosectl/LICENSE`.
 
-For safety, setup will not replace a different existing `~/.local/bin/bosectl`
-executable. It may replace the legacy symlink created by an earlier plugin
-version, which pointed to `~/.local/share/bosectl/bosectl`.
-
-The setup script requires Python 3. To update the bundled dependency, review the
-upstream source and the changes recorded in `bosectl/UPSTREAM.md`, then publish
-a new plugin version.
+To update the bundled dependency, review the upstream source and the changes
+recorded in `bosectl/UPSTREAM.md`, then publish a new plugin version.
 
 ## Usage
 
@@ -70,22 +61,23 @@ The panel selects bundled `bosectl` configurations for these device families:
 - QuietComfort 35 and 35 II
 - QuietComfort 45
 - QuietComfort Earbuds
+- Ultra Open Earbuds (battery and current-mode status; no noise control)
 
 Available controls depend on each device configuration and its verified BMAP
 capabilities. QuietComfort 45 support is inherited and has not been validated
 on physical hardware. QuietComfort Ultra Earbuds 2 report separate left, right,
 and case battery rows through vendor BMAP readings.
 
-The bundled runtime contains a partial Ultra Open Earbuds configuration, but
-the panel does not yet distinguish Ultra Open from QuietComfort Ultra earbuds;
-Ultra Open is therefore not currently supported by the widget.
+Device controls come from the resolved runtime configuration. Unsupported Bose
+products remain visible when paired but show a specific unsupported-device
+error and receive no BMAP commands.
 
 Protocol observations and the case-charging investigation plan are documented
 in [`knowledge/`](knowledge/).
 
-The runtime migration roadmap is documented in [`TODO.md`](TODO.md). Python is
-the current implementation; a persistent Rust daemon is planned for a future
-iteration.
+Runtime follow-up measurements are documented in [`TODO.md`](TODO.md). The
+current bridge starts only while the panel is open and reads only fields shown
+by the panel.
 
 ## Reload and removal
 
@@ -102,12 +94,9 @@ omarchy plugin disable io.github.andresariveros.omabose
 omarchy plugin remove io.github.andresariveros.omabose
 ```
 
-Removal deletes only the plugin checkout. The `bosectl` symlink is a separate
-user-local file; remove it manually if no longer needed:
-
-```bash
-rm -f "$HOME/.local/bin/bosectl"
-```
+Versions through `0.2.0` created a user-local `bosectl` symlink in
+`~/.local/bin`. It is no longer used and may be removed manually after
+upgrading.
 
 ## License and trademarks
 

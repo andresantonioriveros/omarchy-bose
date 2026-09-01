@@ -22,24 +22,15 @@ Panel {
     if (!hasDevice) return "Bose - no paired devices"
     var label = service.selectedDevice ? service.selectedDevice.label : "Bose"
     var battery = service.battery >= 0 ? " - " + service.battery + "%" : ""
-    var mode = service.selectedMode ? " - " + Model.modeLabel(service.selectedMode) : ""
+    var mode = service.selectedModeLabel ? " - " + service.selectedModeLabel : ""
     return label + battery + mode
   }
 
   property bool cursorActive: false
-  property int cursorIndex: 0
-
-  readonly property var cursorRows: {
-    var rows = []
-    for (var i = 0; i < service.boseDevices.length; i++)
-      rows.push({ kind: "device", id: service.boseDevices[i].address, index: i })
-    if (service.vendorAvailable) {
-      for (var m = 0; m < service.modeOptions.length; m++)
-        rows.push({ kind: "mode", id: service.modeOptions[m].id, index: m })
-      if (service.cncAvailable) rows.push({ kind: "cnc", id: "cnc", index: -1 })
-    }
-    return rows
-  }
+  property string cursorKey: ""
+  readonly property var cursorRows: Model.cursorRows(
+    service.boseDevices, service.modeOptions, service.vendorAvailable, service.cncAvailable)
+  readonly property int cursorIndex: Model.rowIndex(cursorRows, cursorKey)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -47,39 +38,42 @@ Panel {
 
   function normalizeCursor() {
     if (cursorRows.length === 0) {
-      cursorIndex = 0
+      cursorKey = ""
       return
     }
-    cursorIndex = Math.max(0, Math.min(cursorRows.length - 1, cursorIndex))
+    if (cursorIndex < 0) cursorKey = cursorRows[0].key
   }
 
   function moveCursor(dx, dy) {
     if (!cursorActive) {
       cursorActive = true
-      cursorIndex = 0
+      normalizeCursor()
       return
     }
     if (cursorRows.length === 0) return
 
-    var current = cursorRows[cursorIndex]
+    var current = cursorIndex >= 0 ? cursorRows[cursorIndex] : null
     if (dx !== 0 && current) {
       if (current.kind === "mode") {
         var nextMode = current.index + (dx > 0 ? 1 : -1)
-        if (nextMode >= 0 && nextMode < service.modeOptions.length)
+        if (nextMode >= 0 && nextMode < service.modeOptions.length) {
+          cursorKey = "mode:" + service.modeOptions[nextMode].id
           service.setMode(service.modeOptions[nextMode].id)
+        }
       } else if (current.kind === "cnc") {
         service.setCnc(service.displayedCnc + (dx > 0 ? 1 : -1))
       }
       return
     }
     if (dy !== 0) {
-      cursorIndex = (cursorIndex + dy + cursorRows.length) % cursorRows.length
+      var nextIndex = (Math.max(0, cursorIndex) + dy + cursorRows.length) % cursorRows.length
+      cursorKey = cursorRows[nextIndex].key
     }
   }
 
   function activateCursor() {
     if (!cursorActive || cursorRows.length === 0) return
-    var current = cursorRows[cursorIndex]
+    var current = cursorIndex >= 0 ? cursorRows[cursorIndex] : null
     if (!current) return
     if (current.kind === "device") {
       root.service.select(current.id)
@@ -91,33 +85,20 @@ Panel {
   function selectDevice(index) {
     if (index < 0 || index >= service.boseDevices.length) return
     cursorActive = true
-    cursorIndex = index
+    cursorKey = "device:" + service.boseDevices[index].address
     service.select(service.boseDevices[index].address)
   }
 
   function selectMode(index) {
     if (index < 0 || index >= service.modeOptions.length) return
     cursorActive = true
-    cursorIndex = service.boseDevices.length + index
+    cursorKey = "mode:" + service.modeOptions[index].id
     service.setMode(service.modeOptions[index].id)
-  }
-
-  function modeIconVariant(id) {
-    if (id === "quiet" || id === "high") return "modeQuiet"
-    if (id === "aware" || id === "low") return "modeAware"
-    if (id === "relax") return "modeRelax"
-    if (id === "immersion") return "modeImmersion"
-    if (id === "cinema") return "modeCinema"
-    if (id === "off") return "modeOff"
-    return "mode"
   }
 
   onCursorRowsChanged: normalizeCursor()
   onOpenedChanged: {
-    if (opened) {
-      cursorActive = false
-      service.refreshDevices()
-    }
+    if (opened) cursorActive = false
   }
 
   Service {
@@ -198,15 +179,18 @@ Panel {
             title: service.selectedDevice ? service.selectedDevice.label : "Bose"
             meta: service.selectedDevice && !service.selectedDevice.connected
               ? "Disconnected"
-              : (service.vendorAvailable
-                ? (service.selectedMode ? Model.modeLabel(service.selectedMode) : "Connected")
-                : (service.vendorLoading ? "Loading Bose controls" :
-                  (root.hasConnectedDevice ? "Run setup to install bosectl" : "Paired device")))
+              : (service.vendorStale
+                ? ((service.selectedModeLabel || "Connected") + " - Status stale")
+                : (service.vendorAvailable
+                  ? (service.selectedModeLabel || "Connected")
+                  : (service.vendorLoading ? "Loading Bose controls" :
+                    (service.vendorError !== "" ? "Bose controls unavailable" : "Paired device"))))
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: service.actionStatus !== ""
             width: parent.width
             text: service.actionStatus
@@ -241,7 +225,7 @@ Panel {
                 width: parent ? parent.width : 0
                 implicitHeight: Style.space(48)
                 current: service.selectedAddress === modelData.address
-                hasCursor: root.cursorActive && root.cursorIndex === index
+                hasCursor: root.cursorActive && root.cursorKey === "device:" + modelData.address
                 foreground: root.foreground
 
                 Row {
@@ -266,6 +250,7 @@ Panel {
                     spacing: Style.space(2)
 
                     Text {
+                      textFormat: Text.PlainText
                       width: parent.width
                       text: modelData.label
                       color: root.foreground
@@ -275,8 +260,9 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       width: parent.width
-                      text: (modelData.connected ? "Connected" : "Paired")
+                      text: (modelData.connected ? "Connected" : (modelData.paired ? "Paired" : "Known"))
                         + (modelData.battery >= 0 ? "  -  " + modelData.battery + "%" : "")
                       color: root.dim
                       font.family: root.fontFamily
@@ -289,7 +275,7 @@ Panel {
                 HoverHandler {
                   onHoveredChanged: if (hovered) {
                     root.cursorActive = true
-                    root.cursorIndex = index
+                    root.cursorKey = "device:" + modelData.address
                   }
                 }
                 MouseArea {
@@ -330,6 +316,7 @@ Panel {
 
                   Text {
                     id: batteryLabel
+                    textFormat: Text.PlainText
                     width: Style.space(88)
                     text: modelData.label
                     color: root.dim
@@ -356,6 +343,7 @@ Panel {
 
                   Text {
                     id: batteryValue
+                    textFormat: Text.PlainText
                     width: Style.space(42)
                     text: modelData.level >= 0 ? modelData.level + "%" : "-"
                     color: root.foreground
@@ -375,7 +363,7 @@ Panel {
           }
 
           Column {
-            visible: service.vendorAvailable
+            visible: service.vendorAvailable && service.modeOptions.length > 0
             width: parent.width
             spacing: Style.space(7)
 
@@ -393,7 +381,7 @@ Panel {
                 width: parent ? parent.width : 0
                 implicitHeight: Style.space(44)
                 current: service.selectedMode === modelData.id
-                hasCursor: root.cursorActive && root.cursorIndex === service.boseDevices.length + index
+                hasCursor: root.cursorActive && root.cursorKey === "mode:" + modelData.id
                 foreground: root.foreground
 
                 Row {
@@ -405,7 +393,7 @@ Panel {
                     width: Style.space(22)
                     height: Style.space(22)
                     iconSize: width
-                    variant: root.modeIconVariant(modelData.id)
+                    variant: Model.modeIconVariant(modelData.id)
                     color: modelData.id === service.selectedMode ? Color.accent : root.dim
                     anchors.verticalCenter: parent.verticalCenter
                   }
@@ -413,6 +401,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(1)
                     Text {
+                      textFormat: Text.PlainText
                       text: modelData.label
                       color: root.foreground
                       font.family: root.fontFamily
@@ -420,6 +409,7 @@ Panel {
                       font.bold: true
                     }
                     Text {
+                      textFormat: Text.PlainText
                       text: modelData.detail
                       color: root.dim
                       font.family: root.fontFamily
@@ -431,7 +421,7 @@ Panel {
                 HoverHandler {
                   onHoveredChanged: if (hovered) {
                     root.cursorActive = true
-                    root.cursorIndex = root.service.boseDevices.length + index
+                    root.cursorKey = "mode:" + modelData.id
                   }
                 }
                 MouseArea {
@@ -456,7 +446,7 @@ Panel {
             CursorSurface {
               width: parent.width
               implicitHeight: Style.space(56)
-              hasCursor: root.cursorActive && root.cursorIndex === root.cursorRows.length - 1
+              hasCursor: root.cursorActive && root.cursorKey === "cnc"
               foreground: root.foreground
 
               Row {
@@ -479,15 +469,17 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(3)
                   Text {
+                    textFormat: Text.PlainText
                     text: "Cancellation"
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     font.bold: true
                   }
-                   Text {
-                      text: service.displayedCnc + "/" + service.vendorStatus.cncMax
-                       + "  -  0 is none, " + service.vendorStatus.cncMax + " is maximum"
+                  Text {
+                    textFormat: Text.PlainText
+                    text: service.displayedCnc + "/" + service.vendorStatus.cncMax
+                      + "  -  0 is none, " + service.vendorStatus.cncMax + " is maximum"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -498,7 +490,7 @@ Panel {
               HoverHandler {
                 onHoveredChanged: if (hovered) {
                   root.cursorActive = true
-                  root.cursorIndex = root.cursorRows.length - 1
+                  root.cursorKey = "cnc"
                 }
               }
             }
@@ -513,7 +505,7 @@ Panel {
               maximum: service.vendorStatus.cncMax
               step: 1
               integer: true
-               value: draft >= 0 ? draft : service.displayedCnc
+              value: draft >= 0 ? draft : service.displayedCnc
               onMoved: function(value) { draft = value }
               onReleased: function(value) {
                 service.setCnc(value)
@@ -523,12 +515,13 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: !service.vendorAvailable && service.selectedDevice
             width: parent.width
             text: service.selectedDevice
               ? (!service.selectedDevice.connected
                 ? "Disconnected"
-                : (service.vendorLoading ? "Loading Bose controls..." : "Run setup to install bosectl"))
+                : (service.vendorLoading ? "Loading Bose controls..." : "Bose controls unavailable"))
               : ""
             color: service.selectedDevice && (!service.selectedDevice.connected || service.vendorLoading)
               ? root.dim
@@ -538,6 +531,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: service.vendorError !== ""
             width: parent.width
             text: service.vendorError
