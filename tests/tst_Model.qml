@@ -96,6 +96,17 @@ TestCase {
     compare(status.eqBands.length, 0)
   }
 
+  function test_parseBridgeStatusAccepts03PayloadWithoutEqualizer() {
+    var payload = JSON.parse(bridgePayload())
+    delete payload.equalizer
+
+    var status = Model.parseBridgeStatus(JSON.stringify(payload))
+
+    verify(status.reachable)
+    verify(!status.eqAvailable)
+    compare(status.eqBands.length, 0)
+  }
+
   function test_equalizerPresetsMatchOfficialValues() {
     var presets = Model.equalizerPresets()
 

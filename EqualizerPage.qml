@@ -230,6 +230,18 @@ Column {
     horizontalAlignment: Text.AlignHCenter
   }
 
+  Text {
+    textFormat: Text.PlainText
+    visible: root.service && root.service.vendorError !== ""
+    width: parent.width
+    text: root.service ? root.service.vendorError : ""
+    color: Color.urgent
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    horizontalAlignment: Text.AlignHCenter
+    wrapMode: Text.Wrap
+  }
+
   Row {
     width: parent.width
 
@@ -335,6 +347,7 @@ Column {
     Connections {
       target: root
       function onDisplayBandsChanged() { curve.requestPaint() }
+      function onForegroundChanged() { curve.requestPaint() }
     }
 
     Repeater {
