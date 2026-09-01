@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.andresariveros.omabose",
   "name": "Bose",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": "Andres Riveros",
   "license": "MIT",
-  "description": "Bose QuietComfort battery, mode, and noise-control panel",
+  "description": "Bose QuietComfort battery, mode, noise-control, and equalizer panel",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Bose",
-    "description": "Bose QuietComfort battery, mode, and noise-control panel",
+    "description": "Bose QuietComfort battery, mode, noise-control, and equalizer panel",
     "category": "Audio",
     "allowMultiple": false,
     "defaultSection": "right",

@@ -105,7 +105,9 @@ Panel {
     view = "main"
     cursorActive = true
     cursorKey = "eq"
-    flickable.contentY = Math.max(0, flickable.contentHeight - flickable.height)
+    Qt.callLater(function() {
+      flickable.contentY = Math.max(0, flickable.contentHeight - flickable.height)
+    })
   }
 
   function equalizerSummary() {

@@ -200,6 +200,51 @@ def test_equalizer_status_rejects_incomplete_response():
     assert bridge.equalizer_status(device) == {"available": False, "bands": []}
 
 
+@pytest.mark.parametrize(
+    "bands",
+    [
+        [
+            EqBand(0, "Bass", -10, 10, 0),
+            EqBand(0, "Bass", -10, 10, 0),
+            EqBand(2, "Treble", -10, 10, 0),
+        ],
+        [
+            EqBand(0, "Bass", -10, 10, 0),
+            EqBand(1, "Mid", -10, 10, 0),
+            EqBand(2, "Treble", -10, 10, 0),
+            EqBand(3, "Extra", -10, 10, 0),
+        ],
+        [
+            EqBand(0, "Bass", -10, 10, 11),
+            EqBand(1, "Mid", -10, 10, 0),
+            EqBand(2, "Treble", -10, 10, 0),
+        ],
+    ],
+)
+def test_equalizer_status_rejects_invalid_band_sets(bands):
+    assert bridge.equalizer_status(EqDevice(bands)) == {
+        "available": False,
+        "bands": [],
+    }
+
+
+def test_equalizer_status_limits_values_to_writable_range():
+    device = EqDevice([
+        EqBand(0, "Bass", -20, 20, -10),
+        EqBand(1, "Mid", -20, 20, 0),
+        EqBand(2, "Treble", -20, 20, 10),
+    ])
+
+    status = bridge.equalizer_status(device)
+
+    assert status["available"] is True
+    assert [(band["minimum"], band["maximum"]) for band in status["bands"]] == [
+        (-10, 10),
+        (-10, 10),
+        (-10, 10),
+    ]
+
+
 def test_set_equalizer_validates_reported_band_ranges():
     device = EqDevice()
 
@@ -208,6 +253,23 @@ def test_set_equalizer_validates_reported_band_ranges():
     assert device.values == (-8, -2, 0)
     with pytest.raises(ValueError, match="Bass must be -10-10"):
         bridge.set_equalizer(device, -11, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ((11, 0, 0), "Bass must be -10-10"),
+        ((0, -11, 0), "Mid must be -10-10"),
+        ((0, 0, 11), "Treble must be -10-10"),
+    ],
+)
+def test_set_equalizer_rejects_each_out_of_range_band(values, message):
+    device = EqDevice()
+
+    with pytest.raises(ValueError, match=message):
+        bridge.set_equalizer(device, *values)
+
+    assert device.values is None
 
 
 def test_equalizer_arguments_require_three_integers():

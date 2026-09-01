@@ -29,6 +29,8 @@ EQ_BANDS = (
     (1, "mid", "Mid"),
     (2, "treble", "Treble"),
 )
+EQ_MINIMUM = -10
+EQ_MAXIMUM = 10
 
 
 def resolve_device(mac):
@@ -116,14 +118,16 @@ def equalizer_bands(device):
         if band_id in by_id:
             raise BmapError("Equalizer returned a duplicate band")
         by_id[band_id] = band
+    if len(by_id) != len(EQ_BANDS):
+        raise BmapError("Equalizer returned unexpected bands")
 
     normalized = []
     for band_id, name, label in EQ_BANDS:
         band = by_id.get(band_id)
         if band is None:
             raise BmapError("Equalizer did not return all three bands")
-        minimum = int(band.min_val)
-        maximum = int(band.max_val)
+        minimum = max(int(band.min_val), EQ_MINIMUM)
+        maximum = min(int(band.max_val), EQ_MAXIMUM)
         current = int(band.current)
         if minimum > maximum or current < minimum or current > maximum:
             raise BmapError("Equalizer returned invalid band values")
