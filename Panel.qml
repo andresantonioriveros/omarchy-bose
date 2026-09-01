@@ -28,8 +28,10 @@ Panel {
 
   property bool cursorActive: false
   property string cursorKey: ""
-  readonly property var cursorRows: Model.cursorRows(
-    service.boseDevices, service.modeOptions, service.vendorAvailable, service.cncAvailable)
+  property string view: "main"
+  readonly property var cursorRows: view === "main" ? Model.cursorRows(
+    service.boseDevices, service.modeOptions, service.vendorAvailable,
+    service.cncAvailable, service.eqAvailable) : []
   readonly property int cursorIndex: Model.rowIndex(cursorRows, cursorKey)
 
   implicitWidth: button.implicitWidth
@@ -45,6 +47,10 @@ Panel {
   }
 
   function moveCursor(dx, dy) {
+    if (view === "equalizer" && eqLoader.item) {
+      eqLoader.item.moveCursor(dx, dy)
+      return
+    }
     if (!cursorActive) {
       cursorActive = true
       normalizeCursor()
@@ -72,6 +78,10 @@ Panel {
   }
 
   function activateCursor() {
+    if (view === "equalizer" && eqLoader.item) {
+      eqLoader.item.activateCursor()
+      return
+    }
     if (!cursorActive || cursorRows.length === 0) return
     var current = cursorIndex >= 0 ? cursorRows[cursorIndex] : null
     if (!current) return
@@ -79,7 +89,31 @@ Panel {
       root.service.select(current.id)
     } else if (current.kind === "mode") {
       root.service.setMode(current.id)
+    } else if (current.kind === "eq") {
+      root.openEqualizer()
     }
+  }
+
+  function openEqualizer() {
+    if (!service.eqAvailable) return
+    view = "equalizer"
+    cursorActive = true
+    flickable.contentY = 0
+  }
+
+  function closeEqualizer() {
+    view = "main"
+    cursorActive = true
+    cursorKey = "eq"
+    flickable.contentY = Math.max(0, flickable.contentHeight - flickable.height)
+  }
+
+  function equalizerSummary() {
+    var bands = service.displayedEqBands
+    if (!bands || bands.length !== 3) return ""
+    return "Bass " + Model.formatEqualizerValue(bands[0].value)
+      + "  |  Mid " + Model.formatEqualizerValue(bands[1].value)
+      + "  |  Treble " + Model.formatEqualizerValue(bands[2].value)
   }
 
   function selectDevice(index) {
@@ -99,12 +133,21 @@ Panel {
   onCursorRowsChanged: normalizeCursor()
   onOpenedChanged: {
     if (opened) cursorActive = false
+    else view = "main"
   }
 
   Service {
     id: boseService
     settings: root.settings
     active: root.opened
+  }
+
+  Connections {
+    target: root.service
+    function onSelectedAddressChanged() { root.view = "main" }
+    function onEqAvailableChanged() {
+      if (!root.service.eqAvailable) root.view = "main"
+    }
   }
 
   Component {
@@ -128,6 +171,20 @@ Panel {
         variant: "mark"
         color: root.foreground
       }
+    }
+  }
+
+  Component {
+    id: equalizerPage
+    EqualizerPage {
+      service: root.service
+      foreground: root.foreground
+      background: root.bar ? root.bar.background : Color.background
+      dim: root.dim
+      fontFamily: root.fontFamily
+      cursorActive: root.cursorActive
+      onCursorEngaged: root.cursorActive = true
+      onBackRequested: root.closeEqualizer()
     }
   }
 
@@ -157,7 +214,10 @@ Panel {
       anchors.fill: parent
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.view === "equalizer") root.closeEqualizer()
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
       Flickable {
@@ -175,6 +235,7 @@ Panel {
 
           PanelHero {
             width: parent.width
+            visible: root.view === "main"
             iconComponent: heroIcon
             title: service.selectedDevice ? service.selectedDevice.label : "Bose"
             meta: service.selectedDevice && !service.selectedDevice.connected
@@ -191,7 +252,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: service.actionStatus !== ""
+            visible: root.view === "main" && service.actionStatus !== ""
             width: parent.width
             text: service.actionStatus
             color: Color.accent
@@ -202,12 +263,12 @@ Panel {
           }
 
           PanelSeparator {
-            visible: service.boseDevices.length > 1
+            visible: root.view === "main" && service.boseDevices.length > 1
             foreground: root.foreground
           }
 
           Column {
-            visible: service.boseDevices.length > 1
+            visible: root.view === "main" && service.boseDevices.length > 1
             width: parent.width
             spacing: Style.space(6)
 
@@ -287,13 +348,13 @@ Panel {
           }
 
           PanelSeparator {
-            visible: service.selectedDevice !== null
+            visible: root.view === "main" && service.selectedDevice !== null
             foreground: root.foreground
           }
 
           Column {
             width: parent.width
-            visible: service.selectedDevice !== null
+            visible: root.view === "main" && service.selectedDevice !== null
             spacing: Style.space(8)
 
             PanelSectionHeader {
@@ -358,12 +419,14 @@ Panel {
           }
 
           PanelSeparator {
-            visible: service.vendorAvailable || service.vendorError !== ""
+            visible: root.view === "main"
+              && (service.vendorAvailable || service.vendorError !== "")
             foreground: root.foreground
           }
 
           Column {
-            visible: service.vendorAvailable && service.modeOptions.length > 0
+            visible: root.view === "main"
+              && service.vendorAvailable && service.modeOptions.length > 0
             width: parent.width
             spacing: Style.space(7)
 
@@ -433,7 +496,8 @@ Panel {
           }
 
           Column {
-            visible: service.vendorAvailable && service.cncAvailable
+            visible: root.view === "main"
+              && service.vendorAvailable && service.cncAvailable
             width: parent.width
             spacing: Style.space(6)
 
@@ -514,9 +578,76 @@ Panel {
             }
           }
 
+          PanelSeparator {
+            visible: root.view === "main" && service.eqAvailable
+            foreground: root.foreground
+          }
+
+          CursorSurface {
+            visible: root.view === "main" && service.eqAvailable
+            width: parent.width
+            implicitHeight: Style.space(54)
+            hasCursor: root.cursorActive && root.cursorKey === "eq"
+            foreground: root.foreground
+            bordered: true
+
+            Row {
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(10)
+              spacing: Style.space(11)
+
+              BoseIcon {
+                width: Style.space(24)
+                height: Style.space(24)
+                iconSize: width
+                variant: "equalizer"
+                color: root.foreground
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Column {
+                width: Math.max(0, parent.width - parent.spacing - Style.space(34))
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "EQ"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: root.equalizerSummary()
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
+            HoverHandler {
+              onHoveredChanged: if (hovered) {
+                root.cursorActive = true
+                root.cursorKey = "eq"
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.openEqualizer()
+            }
+          }
+
           Text {
             textFormat: Text.PlainText
-            visible: !service.vendorAvailable && service.selectedDevice
+            visible: root.view === "main"
+              && !service.vendorAvailable && service.selectedDevice
             width: parent.width
             text: service.selectedDevice
               ? (!service.selectedDevice.connected
@@ -532,13 +663,21 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: service.vendorError !== ""
+            visible: root.view === "main" && service.vendorError !== ""
             width: parent.width
             text: service.vendorError
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.Wrap
+          }
+
+          Loader {
+            id: eqLoader
+            visible: active
+            active: root.view === "equalizer"
+            width: parent.width
+            sourceComponent: equalizerPage
           }
         }
       }
