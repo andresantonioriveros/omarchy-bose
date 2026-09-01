@@ -11,100 +11,153 @@ Item {
   property bool active: false
   readonly property var rawDevices: Bluetooth.devices ? Bluetooth.devices.values : []
 
-  property var boseDevices: []
+  readonly property var boseDevices: Model.boseDeviceRows(rawDevices)
   property string selectedAddress: ""
   property string selectedDeviceSignature: ""
   property var vendorStatus: Model.emptyStatus()
   property string vendorStatusAddress: ""
+  property string vendorState: "idle"
   property string pendingMode: ""
   property int pendingCnc: -1
+  property int pendingVerificationAttempts: 0
   property string vendorError: ""
   property string actionStatus: ""
   property string statusOutput: ""
   property string statusError: ""
   property string actionOutput: ""
   property string actionError: ""
+  property bool statusTimedOut: false
+  property bool actionTimedOut: false
+
+  readonly property string selectionPath: Quickshell.env("HOME") + "/.local/state/omarchy/omabose.json"
+  property bool selectionLoaded: false
+  property string preferredAddress: ""
 
   readonly property var connectedDevices: boseDevices.filter(function(device) { return device.connected })
-  readonly property var selectedDevice: {
-    for (var i = 0; i < boseDevices.length; i++) {
-      if (boseDevices[i].address === selectedAddress) return boseDevices[i]
-    }
-    return null
-  }
+  readonly property var selectedDevice: Model.deviceForAddress(boseDevices, selectedAddress)
+  readonly property bool vendorMatchesSelection: selectedDevice
+    && vendorStatus.reachable
+    && vendorStatusAddress === selectedDevice.address
   readonly property int battery: selectedDevice
-    ? (vendorStatus.reachable && vendorStatus.battery >= 0 ? vendorStatus.battery : -1)
+    ? (vendorMatchesSelection && vendorStatus.battery >= 0
+      ? vendorStatus.battery : selectedDevice.battery)
     : -1
   readonly property string selectedMode: pendingMode !== ""
-    ? pendingMode : (vendorStatus.reachable ? vendorStatus.mode : "")
+    ? pendingMode : (vendorMatchesSelection ? vendorStatus.mode : "")
+  readonly property string selectedModeLabel: pendingMode !== ""
+    ? Model.modeLabel(pendingMode)
+    : (vendorMatchesSelection ? vendorStatus.modeLabel : "")
   readonly property int displayedCnc: pendingCnc >= 0
-    ? pendingCnc
-    : (vendorStatus.cnc >= 0 ? vendorStatus.cncMax - vendorStatus.cnc : -1)
-  readonly property var modeOptions: Model.modeOptions(vendorStatus)
+    ? pendingCnc : (vendorMatchesSelection ? vendorStatus.cnc : -1)
+  readonly property var modeOptions: vendorMatchesSelection ? vendorStatus.modeOptions : []
   readonly property var batteryRows: Model.batteryRows(selectedDevice, vendorStatus)
-  readonly property bool vendorAvailable: vendorStatus.reachable
-  readonly property bool vendorLoading: active && selectedDevice && selectedDevice.connected
-    && (!vendorStatus.reachable || vendorStatusAddress !== selectedAddress)
-    && vendorError === ""
-  readonly property bool cncAvailable: vendorStatus.reachable && vendorStatus.cnc >= 0
-  readonly property string controlPath: "bosectl"
+  readonly property bool vendorAvailable: vendorMatchesSelection
+  readonly property bool vendorLoading: vendorState === "loading"
+  readonly property bool vendorStale: vendorState === "stale"
+  readonly property bool cncAvailable: vendorMatchesSelection && vendorStatus.cncAvailable
+  readonly property string bridgePath: decodeURIComponent(
+    Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//, ""))
+  readonly property int pollIntervalMs: {
+    var seconds = Number(setting("pollIntervalSec", 15))
+    if (!isFinite(seconds)) seconds = 15
+    return Math.max(5, Math.min(120, seconds)) * 1000
+  }
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
   }
 
-  function refreshDevices() {
-    var next = []
-    for (var i = 0; i < rawDevices.length; i++) {
-      if (Model.isBoseDevice(rawDevices[i])) next.push(Model.deviceSnapshot(rawDevices[i]))
-    }
-    boseDevices = Model.sortDevices(next)
+  function findDevice(address) {
+    return Model.deviceForAddress(boseDevices, address)
+  }
 
-    var current = selectedDevice
-    var target = current
-    if (!target) {
-      for (var j = 0; j < boseDevices.length; j++) {
-        if (boseDevices[j].connected) {
-          target = boseDevices[j]
-          break
-        }
-      }
-    }
-    if (!target && boseDevices.length > 0) target = boseDevices[0]
+  function parsePersistedAddress(raw) {
+    try {
+      var obj = JSON.parse(String(raw || ""))
+      var addr = String(obj && obj.selectedAddress || "").toUpperCase()
+      if (/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(addr)) return addr
+    } catch (e) {}
+    return ""
+  }
+
+  function loadSelection(raw) {
+    if (selectionLoaded) return
+    var addr = parsePersistedAddress(raw)
+    preferredAddress = addr
+    selectionLoaded = true
+    reconcileDevices()
+  }
+
+  function flushSelection() {
+    if (!selectionLoaded) return
+    var payload = preferredAddress ? { selectedAddress: preferredAddress.toUpperCase() } : {}
+    selectionFile.setText(JSON.stringify(payload, null, 2) + "\n")
+  }
+
+  function reconcileDevices() {
+    var target = Model.preferredDevice(
+      boseDevices, selectedAddress, selectionLoaded ? preferredAddress : "")
 
     var nextAddress = target ? target.address : ""
     var nextSignature = target ? target.address + ":" + (target.connected ? "connected" : "paired") : ""
     var stateChanged = nextSignature !== selectedDeviceSignature
-    if (stateChanged) vendorGeneration++
     selectedDeviceSignature = nextSignature
     if (nextAddress !== selectedAddress) selectedAddress = nextAddress
-    else if (stateChanged) refreshVendor()
+    else if (stateChanged) {
+      vendorGeneration++
+      clearPending()
+      if (!target || !target.connected) clearVendor("idle")
+      refreshVendor()
+    }
   }
 
   function select(address) {
-    if (!address || address === selectedAddress) return
-    selectedAddress = address
+    var selected = findDevice(address)
+    if (!selected) return
+    preferredAddress = selected.address
+    if (selectionLoaded) selectionSaveTimer.restart()
+    if (selected.address !== selectedAddress) selectedAddress = selected.address
   }
 
   function command(args) {
     if (!selectedDevice || !selectedDevice.connected) return []
-    return [
-      "env",
-      "BOSE_MAC=" + selectedDevice.address,
-      "BMAP_DEVICE=" + Model.deviceType(selectedDevice),
-      controlPath
-    ].concat(args)
+    return ["/usr/bin/python3", bridgePath, "--mac", selectedDevice.address].concat(args)
+  }
+
+  function clearPending() {
+    pendingMode = ""
+    pendingCnc = -1
+    pendingVerificationAttempts = 0
+  }
+
+  function retryPendingChange() {
+    if (pendingMode === "" && pendingCnc < 0) {
+      pendingVerificationAttempts = 0
+      return
+    }
+    if (pendingVerificationAttempts < 2) {
+      pendingVerificationAttempts++
+      verificationRefresh.restart()
+      return
+    }
+    clearPending()
+    actionStatus = "Device did not confirm the requested change"
+    actionMessageTimer.restart()
+  }
+
+  function clearVendor(state) {
+    vendorStatus = Model.emptyStatus()
+    vendorStatusAddress = ""
+    vendorState = state || "idle"
   }
 
   function refreshVendor() {
-    vendorError = ""
     if (!active || !selectedDevice || !selectedDevice.connected) {
       refreshQueued = false
-      vendorStatus = Model.emptyStatus()
-      vendorStatusAddress = ""
-      pendingMode = ""
-      pendingCnc = -1
+      clearVendor("idle")
+      clearPending()
+      vendorError = ""
       return
     }
     if (vendorStatusAddress !== selectedDevice.address) {
@@ -116,8 +169,11 @@ Item {
       return
     }
     refreshQueued = false
+    vendorState = vendorAvailable ? vendorState : "loading"
+    vendorError = ""
     statusOutput = ""
     statusError = ""
+    statusTimedOut = false
     statusRequestAddress = selectedDevice.address
     statusRequestGeneration = vendorGeneration
     statusProcess.command = command(["status"])
@@ -125,7 +181,8 @@ Item {
   }
 
   function runAction(args, successText) {
-    if (!active || !selectedDevice || !selectedDevice.connected || actionProcess.running) return false
+    if (!active || !selectedDevice || !selectedDevice.connected
+        || !vendorAvailable || actionProcess.running) return false
     if (statusProcess.running) {
       actionStatus = "Bose controls are refreshing; try again shortly"
       actionMessageTimer.restart()
@@ -135,6 +192,7 @@ Item {
     vendorError = ""
     actionOutput = ""
     actionError = ""
+    actionTimedOut = false
     actionSuccessText = successText
     actionRequestAddress = selectedDevice.address
     actionRequestGeneration = vendorGeneration
@@ -145,14 +203,13 @@ Item {
 
   function setMode(mode) {
     if (!mode) return
-    if (runAction([mode], "Mode: " + Model.modeLabel(mode))) pendingMode = mode
+    if (runAction(["mode", mode], "Mode: " + Model.modeLabel(mode))) pendingMode = mode
   }
 
   function setCnc(value) {
     if (!cncAvailable) return
     var level = Math.max(0, Math.min(vendorStatus.cncMax, Math.round(value)))
-    var vendorLevel = vendorStatus.cncMax - level
-    if (runAction(["cnc", String(vendorLevel)], "Cancellation: " + level + "/" + vendorStatus.cncMax)) pendingCnc = level
+    if (runAction(["cnc", String(level)], "Cancellation: " + level + "/" + vendorStatus.cncMax)) pendingCnc = level
   }
 
   function clearActionStatus() {
@@ -167,15 +224,21 @@ Item {
   property int statusRequestGeneration: -1
   property int actionRequestGeneration: -1
 
-  onRawDevicesChanged: refreshDevices()
+  onBoseDevicesChanged: reconcileDevices()
   onSelectedAddressChanged: {
     vendorGeneration++
-    vendorStatus = Model.emptyStatus()
-    vendorStatusAddress = ""
-    pendingMode = ""
-    pendingCnc = -1
+    var selected = findDevice(selectedAddress)
+    var isConnected = selected ? selected.connected : false
+    selectedDeviceSignature = selectedAddress ? selectedAddress + ":" + (isConnected ? "connected" : "paired") : ""
+    refreshQueued = false
+    if (statusProcess.running) statusProcess.running = false
+    if (actionProcess.running) actionProcess.running = false
+    clearVendor(active && isConnected ? "loading" : "idle")
+    clearPending()
+    vendorError = ""
     actionStatus = ""
-    refreshVendor()
+    // The selectedDevice binding updates after this property handler.
+    Qt.callLater(refreshVendor)
   }
   onActiveChanged: {
     vendorGeneration++
@@ -184,35 +247,24 @@ Item {
       refreshQueued = false
       if (statusProcess.running) statusProcess.running = false
       if (actionProcess.running) actionProcess.running = false
-      vendorStatus = Model.emptyStatus()
-      vendorStatusAddress = ""
-      pendingMode = ""
-      pendingCnc = -1
+      clearVendor("idle")
+      clearPending()
       vendorError = ""
       actionStatus = ""
     }
   }
 
   Timer {
-    id: deviceTimer
-    interval: 2500
-    repeat: true
-    running: true
-    triggeredOnStart: true
-    onTriggered: root.refreshDevices()
-  }
-
-  Timer {
     id: vendorTimer
-    interval: Math.max(5, Number(root.setting("pollIntervalSec", 15))) * 1000
+    interval: root.pollIntervalMs
     repeat: true
     running: root.active
     onTriggered: root.refreshVendor()
   }
 
   Timer {
-    id: delayedRefresh
-    interval: 450
+    id: verificationRefresh
+    interval: 700 + root.pendingVerificationAttempts * 700
     repeat: false
     onTriggered: root.refreshVendor()
   }
@@ -222,6 +274,43 @@ Item {
     interval: 2600
     repeat: false
     onTriggered: root.clearActionStatus()
+  }
+
+  Timer {
+    id: selectionSaveTimer
+    interval: 250
+    repeat: false
+    onTriggered: root.flushSelection()
+  }
+
+  Timer {
+    interval: 20000
+    repeat: false
+    running: statusProcess.running
+    onTriggered: {
+      root.statusTimedOut = true
+      statusProcess.running = false
+    }
+  }
+
+  Timer {
+    interval: 20000
+    repeat: false
+    running: actionProcess.running
+    onTriggered: {
+      root.actionTimedOut = true
+      actionProcess.running = false
+    }
+  }
+
+  FileView {
+    id: selectionFile
+    path: root.selectionPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.loadSelection(text())
+    onLoadFailed: root.loadSelection("")
   }
 
   Process {
@@ -248,24 +337,40 @@ Item {
           root.refreshVendor()
         return
       }
-      if (exitCode === 0) {
-        var parsed = Model.parseStatus(output)
-        if (parsed.reachable) {
+      var failure = ""
+      if (root.statusTimedOut) {
+        failure = "Bose status request timed out"
+      } else if (exitCode !== 0) {
+        failure = Model.errorForProcess(error || output)
+      } else {
+        try {
+          var parsed = Model.parseBridgeStatus(output)
+          if (!parsed.reachable || parsed.address !== root.statusRequestAddress.toUpperCase())
+            throw new Error("Bose returned status for a different device")
           root.vendorStatus = parsed
           root.vendorStatusAddress = root.statusRequestAddress
+          root.vendorState = "ready"
+          root.vendorError = ""
+
+          var pendingMismatch = false
           if (root.pendingMode !== "" && parsed.mode === root.pendingMode)
             root.pendingMode = ""
-          if (root.pendingCnc >= 0 && parsed.cnc >= 0
-              && parsed.cncMax - parsed.cnc === root.pendingCnc)
+          else if (root.pendingMode !== "") pendingMismatch = true
+          if (root.pendingCnc >= 0 && parsed.cnc === root.pendingCnc)
             root.pendingCnc = -1
-          root.vendorError = ""
-        } else if (!root.vendorStatus.reachable || root.vendorStatusAddress !== root.statusRequestAddress) {
-          root.vendorError = "Bose returned no readable status"
+          else if (root.pendingCnc >= 0) pendingMismatch = true
+
+          if (pendingMismatch) root.retryPendingChange()
+          else root.pendingVerificationAttempts = 0
+        } catch (parseError) {
+          failure = String(parseError)
         }
-      } else if (!root.vendorStatus.reachable || root.vendorStatusAddress !== root.statusRequestAddress) {
-        root.vendorStatus = Model.emptyStatus()
-        root.vendorStatusAddress = ""
-        root.vendorError = Model.errorForProcess(error || output, root.controlPath)
+      }
+      if (failure !== "") {
+        root.vendorError = Model.errorForProcess(failure)
+        if (root.vendorMatchesSelection) root.vendorState = "stale"
+        else root.clearVendor("error")
+        root.retryPendingChange()
       }
       if (root.refreshQueued) root.refreshVendor()
     }
@@ -292,16 +397,22 @@ Item {
       if (exitCode === 0) {
         root.vendorError = ""
         root.actionStatus = root.actionSuccessText
+        root.pendingVerificationAttempts = 0
         actionMessageTimer.restart()
-        delayedRefresh.restart()
+        verificationRefresh.restart()
       } else {
-        root.pendingMode = ""
-        root.pendingCnc = -1
+        root.clearPending()
         var output = String(actionStderr.text || root.actionError || actionStdout.text || root.actionOutput || "")
-        root.vendorError = Model.errorForProcess(output, root.controlPath)
+        root.vendorError = root.actionTimedOut
+          ? "Bose control request timed out" : Model.errorForProcess(output)
         actionMessageTimer.restart()
-        delayedRefresh.restart()
+        verificationRefresh.restart()
       }
     }
+  }
+
+  Component.onCompleted: {
+    selectionFile.reload()
+    reconcileDevices()
   }
 }

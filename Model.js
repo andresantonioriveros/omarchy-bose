@@ -1,22 +1,21 @@
-.pragma library
-
 function emptyStatus() {
   return {
     reachable: false,
+    address: "",
+    deviceType: "",
     model: "",
-    name: "",
     battery: -1,
     batteries: {
       left: -1,
       right: -1,
-      case: -1,
-      headphones: -1,
-      earbuds: -1
+      case: -1
     },
     mode: "",
+    modeLabel: "",
+    modeOptions: [],
     cnc: -1,
-    cncMax: 10,
-    error: ""
+    cncMax: 0,
+    cncAvailable: false
   }
 }
 
@@ -30,51 +29,59 @@ function cleanText(value) {
 function cleanError(value) {
   var text = cleanText(value)
   if (text.indexOf("Connection failed:") >= 0)
-    text = text.substring(text.indexOf("Connection failed:") + 18)
+    text = text.substring(text.indexOf("Connection failed:") + 18).replace(/^\s+/, "")
+  if (text.indexOf("Omabose:") === 0)
+    text = text.substring(8).replace(/^\s+/, "")
   return text || "Bose control is unavailable"
 }
 
-function parseStatus(raw) {
-  var result = emptyStatus()
-  var lines = String(raw === undefined || raw === null ? "" : raw).split(/\r?\n/)
+function percentage(value) {
+  if (value === undefined || value === null || value === "") return -1
+  var number = Number(value)
+  if (!isFinite(number)) return -1
+  return Math.max(0, Math.min(100, Math.round(number)))
+}
 
-  for (var i = 0; i < lines.length; i++) {
-    var line = cleanText(lines[i])
-    var component = line.match(/^\s*(Left|Right|Case|Headphones|Earbuds)\s+.*?(\d{1,3})%/i)
-    if (component) {
-      var componentName = component[1].toLowerCase()
-      if (componentName === "left") result.batteries.left = parseInt(component[2], 10)
-      else if (componentName === "right") result.batteries.right = parseInt(component[2], 10)
-      else if (componentName === "case") result.batteries.case = parseInt(component[2], 10)
-      else if (componentName === "headphones") result.batteries.headphones = parseInt(component[2], 10)
-      else if (componentName === "earbuds") result.batteries.earbuds = parseInt(component[2], 10)
-      continue
-    }
-    var match = line.match(/^\s*(Model|Battery|Mode|CNC|Name)\s+(.+?)\s*$/i)
-    if (!match) continue
+function parseBridgeStatus(raw) {
+  var payload = JSON.parse(String(raw === undefined || raw === null ? "" : raw))
+  if (!payload || Number(payload.schemaVersion) !== 1)
+    throw new Error("Unsupported Bose status format")
 
-    var key = match[1].toLowerCase()
-    var value = match[2]
-    if (key === "model") result.model = value
-    else if (key === "name") result.name = value
-    else if (key === "battery") {
-      var battery = value.match(/-?\d+/)
-      if (battery) result.battery = Math.max(0, Math.min(100, parseInt(battery[0], 10)))
-    } else if (key === "mode") {
-      result.mode = value.toLowerCase().replace(/\s+.*$/, "")
-    } else if (key === "cnc") {
-      var cnc = value.match(/(\d+)\s*\/\s*(\d+)/)
-      if (cnc) {
-        result.cnc = parseInt(cnc[1], 10)
-        result.cncMax = parseInt(cnc[2], 10)
-      }
-    }
+  var status = emptyStatus()
+  var device = payload.device || {}
+  var battery = payload.battery || {}
+  var components = battery.components || {}
+  var mode = payload.mode || {}
+  var noise = payload.noiseControl || {}
+
+  status.address = String(device.address || "").toUpperCase()
+  status.deviceType = String(device.type || "")
+  status.model = cleanText(device.model)
+  status.battery = percentage(battery.level)
+  status.batteries.left = percentage(components.left)
+  status.batteries.right = percentage(components.right)
+  status.batteries.case = percentage(components.case)
+  status.mode = String(mode.currentId || "").toLowerCase()
+  status.modeLabel = cleanText(mode.currentLabel)
+
+  var options = Array.isArray(mode.options) ? mode.options : []
+  for (var i = 0; i < options.length; i++) {
+    var id = String(options[i] && options[i].id || "").toLowerCase()
+    if (!id) continue
+    status.modeOptions.push({
+      id: id,
+      label: cleanText(options[i].label) || modeLabel(id),
+      detail: cleanText(options[i].detail)
+    })
+    if (id === status.mode) status.modeLabel = status.modeOptions[status.modeOptions.length - 1].label
   }
+  if (!status.modeLabel && status.mode) status.modeLabel = modeLabel(status.mode)
 
-  result.reachable = result.model !== "" || result.battery >= 0 || result.mode !== "" || result.cnc >= 0
-    || result.batteries.left >= 0 || result.batteries.right >= 0 || result.batteries.case >= 0
-    || result.batteries.headphones >= 0 || result.batteries.earbuds >= 0
-  return result
+  status.cncAvailable = noise.available === true
+  status.cnc = status.cncAvailable ? percentage(noise.level) : -1
+  status.cncMax = status.cncAvailable ? Math.max(0, Math.round(Number(noise.maximum) || 0)) : 0
+  status.reachable = status.address !== "" && status.deviceType !== "" && status.battery >= 0
+  return status
 }
 
 function numberOrUnknown(value) {
@@ -86,17 +93,14 @@ function numberOrUnknown(value) {
 
 function textFor(device) {
   if (!device) return ""
-  return [device.name, device.deviceName, device.alias, device.description, device.modalias, device.label]
-    .join(" ").toLowerCase()
+  return [device.name, device.deviceName].join(" ").toLowerCase()
 }
 
 function isBoseDevice(device) {
   var text = textFor(device)
   return text.indexOf("bose") >= 0
     || text.indexOf("quietcomfort") >= 0
-    || text.indexOf("qc-") >= 0
-    || text.indexOf("qc_") >= 0
-    || /(^|\s)qc(\s|$)/.test(text)
+    || /(^|[^a-z0-9])qc([^a-z0-9]|$)/.test(text)
 }
 
 function isEarbuds(device) {
@@ -111,21 +115,15 @@ function batteryPercent(device) {
 
 function deviceLabel(device) {
   if (!device) return "Bose"
-  var text = textFor(device)
-  if (text.indexOf("earbud") >= 0 || text.indexOf("earplug") >= 0)
-    return text.indexOf("ultra") >= 0 ? "QuietComfort Ultra 2 Earbuds" : "QuietComfort Earbuds"
-  if (text.indexOf("headphone") >= 0 || text.indexOf("qc-") >= 0 || text.indexOf("qc_") >= 0)
-    return text.indexOf("ultra") >= 0 ? "QuietComfort Ultra 2 Headphones" : "QuietComfort Headphones"
-    return "QuietComfort Headphones"
-  return device.name || device.deviceName || "Bose device"
+  return cleanText(device.deviceName || device.name) || "Bose device"
 }
 
 function deviceSnapshot(device) {
   return {
     address: String(device && device.address || ""),
-    name: String(device && device.name || ""),
-    deviceName: String(device && device.deviceName || ""),
     connected: !!(device && device.connected),
+    paired: !!(device && (device.paired || device.bonded)),
+    known: !!(device && (device.connected || device.paired || device.bonded || device.trusted)),
     battery: batteryPercent(device),
     earbuds: isEarbuds(device),
     label: deviceLabel(device)
@@ -133,65 +131,69 @@ function deviceSnapshot(device) {
 }
 
 function sortDevices(devices) {
-  return devices.sort(function(a, b) {
+  return devices.slice().sort(function(a, b) {
     if (a.connected !== b.connected) return a.connected ? -1 : 1
     return a.label.localeCompare(b.label)
   })
 }
 
-function deviceType(device) {
-  var text = textFor(device)
-  var earbuds = device && device.earbuds === true || isEarbuds(device)
-  if (/(^|\s)(qc[-_ ]?35|quietcomfort[-_ ]?35)(\s|$)/.test(text)) return "qc35"
-  if (/(^|\s)(qc[-_ ]?45|quietcomfort[-_ ]?45)(\s|$)/.test(text)) return "qc45"
-  if (earbuds) return text.indexOf("ultra") >= 0 ? "qc_ultra2_earbuds" : "qc_earbuds"
-  if (text.indexOf("ultra") >= 0) return "qc_ultra2"
-  return "qc_prince"
+function toArray(values) {
+  if (!values) return []
+  if (Array.isArray(values)) return values.slice()
+  var length = Number(values.length || 0)
+  if (!isFinite(length) || length <= 0) return []
+  var result = []
+  for (var i = 0; i < length; i++) result.push(values[i])
+  return result
 }
 
-function modeOptions(status) {
-  var text = String((status && status.model) || "") .toLowerCase()
-  if (text.indexOf("qc35") >= 0 || text.indexOf("quietcomfort 35") >= 0) {
-    return [
-      { id: "high", label: "High", detail: "Maximum cancellation" },
-      { id: "low", label: "Low", detail: "Reduced cancellation" },
-      { id: "off", label: "Off", detail: "No cancellation" }
-    ]
+function boseDeviceRows(values) {
+  var devices = toArray(values)
+  var rows = []
+  for (var i = 0; i < devices.length; i++) {
+    var device = devices[i]
+    if (!device || !isBoseDevice(device)) continue
+    if (!(device.connected || device.paired || device.bonded || device.trusted)) continue
+    rows.push(deviceSnapshot(device))
   }
-  if (text.indexOf("ultra") >= 0) {
-    return [
-      { id: "quiet", label: "Quiet", detail: "Maximum cancellation" },
-      { id: "aware", label: "Aware", detail: "Transparency" },
-      { id: "immersion", label: "Immersion", detail: "Spatial audio" },
-      { id: "cinema", label: "Cinema", detail: "Spatial audio" }
-    ]
+  return sortDevices(rows)
+}
+
+function deviceForAddress(devices, address) {
+  var wanted = String(address || "").toUpperCase()
+  for (var i = 0; devices && i < devices.length; i++) {
+    if (String(devices[i].address || "").toUpperCase() === wanted) return devices[i]
   }
-  return [
-    { id: "quiet", label: "Quiet", detail: "Maximum cancellation" },
-    { id: "aware", label: "Aware", detail: "Transparency" }
-  ]
+  return null
+}
+
+function preferredDevice(devices, currentAddress, preferredAddress) {
+  var preferred = deviceForAddress(devices, preferredAddress)
+  if (preferred) return preferred
+
+  var current = deviceForAddress(devices, currentAddress)
+  if (current && current.connected) return current
+
+  for (var i = 0; devices && i < devices.length; i++) {
+    if (devices[i].connected) return devices[i]
+  }
+  return current || (devices && devices.length > 0 ? devices[0] : null)
 }
 
 function batteryRows(device, status) {
   var batteries = status && status.batteries ? status.batteries : {}
   var rows = []
   var hasBuds = Number(batteries.left) >= 0 || Number(batteries.right) >= 0
-  var hasHeadphones = Number(batteries.headphones) >= 0
-  var hasEarbuds = Number(batteries.earbuds) >= 0
 
   if (hasBuds) {
     rows.push({ label: "Left", level: Number(batteries.left), detail: "" })
     rows.push({ label: "Right", level: Number(batteries.right), detail: "" })
-  } else if (hasHeadphones) {
-    rows.push({ label: "Headphones", level: Number(batteries.headphones), detail: "" })
-  } else if (hasEarbuds) {
-    rows.push({ label: "Earbuds", level: Number(batteries.earbuds), detail: "" })
   } else {
     rows.push({
       label: device && device.earbuds ? "Earbuds" : "Headphones",
       level: status && Number(status.battery) >= 0
         ? Number(status.battery)
-        : -1,
+        : (device && Number(device.battery) >= 0 ? Number(device.battery) : -1),
       detail: ""
     })
   }
@@ -206,12 +208,37 @@ function modeLabel(id) {
   return text.length > 0 ? text.charAt(0).toUpperCase() + text.slice(1) : "Unknown"
 }
 
-function errorForProcess(stderr, path) {
-  var error = cleanError(stderr)
-  if (String(path || "") === "bosectl"
-      && (error.indexOf("not found") >= 0
-        || error.indexOf("No such file") >= 0
-        || error.indexOf("Failed to start") >= 0))
-    return "Run the Omabose setup script to install bosectl"
-  return error
+function modeIconVariant(id) {
+  if (id === "quiet" || id === "high") return "modeQuiet"
+  if (id === "aware" || id === "low") return "modeAware"
+  if (id === "relax") return "modeRelax"
+  if (id === "immersion") return "modeImmersion"
+  if (id === "cinema") return "modeCinema"
+  if (id === "off") return "modeOff"
+  return "mode"
+}
+
+function cursorRows(devices, modes, vendorAvailable, cncAvailable) {
+  var rows = []
+  if (devices && devices.length > 1) {
+    for (var i = 0; i < devices.length; i++)
+      rows.push({ key: "device:" + devices[i].address, kind: "device", id: devices[i].address, index: i })
+  }
+  if (vendorAvailable) {
+    for (var m = 0; modes && m < modes.length; m++)
+      rows.push({ key: "mode:" + modes[m].id, kind: "mode", id: modes[m].id, index: m })
+    if (cncAvailable) rows.push({ key: "cnc", kind: "cnc", id: "cnc", index: -1 })
+  }
+  return rows
+}
+
+function rowIndex(rows, key) {
+  for (var i = 0; rows && i < rows.length; i++) {
+    if (rows[i].key === key) return i
+  }
+  return -1
+}
+
+function errorForProcess(stderr) {
+  return cleanError(stderr)
 }

@@ -1,15 +1,13 @@
 # Omabose TODO
 
-## Persistent Rust Runtime
+## Runtime measurements
 
-- [ ] Define a Rust daemon that owns one persistent BMAP RFCOMM connection per
-  selected Bose device.
-- [ ] Add reconnect, device-disconnect, and backoff handling to the daemon.
-- [ ] Define a local IPC API for status updates and control actions.
-- [ ] Update `Service.qml` to use the daemon IPC instead of starting Python
-  `bosectl` for every poll or action.
-- [ ] Match the current Python runtime's controls, battery parsing, and error
-  behavior on physical hardware.
-- [ ] Package the Rust daemon for supported architectures and make setup safe
-  and reproducible.
-- [ ] Retire the bundled Python CLI after Rust hardware parity is confirmed.
+- [ ] Measure panel-open latency and packet counts on each verified device.
+- [ ] Measure repeated status refreshes before lowering the default interval.
+- [ ] Add unreachable-device backoff if open-panel retries create observable
+  BlueZ churn.
+- [ ] Consider a persistent daemon only if the measured RFCOMM reconnect cost
+  remains user-visible after the lean bridge snapshot.
+- [ ] If a daemon is justified, require reconnect/backoff behavior, a versioned
+  local IPC contract, reproducible packaging, and hardware parity before
+  replacing the Python bridge.
