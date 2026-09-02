@@ -14,7 +14,12 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "bosectl" / "python"))
 
 import pybmap
-from pybmap.discovery import bose_identity, has_bmap, list_bmap_devices
+from pybmap.discovery import (
+    bluetoothctl_path,
+    bose_identity,
+    has_bmap,
+    list_bmap_devices,
+)
 from pybmap.errors import BmapConnectionError, BmapError
 
 
@@ -35,9 +40,15 @@ def resolve_device(mac):
     if not MAC_RE.fullmatch(mac or ""):
         raise BmapError("Invalid Bluetooth address")
 
+    # Pinned system path only: never resolve bluetoothctl via PATH, so a
+    # shadow binary cannot be picked up on panel status/action requests.
+    exe = bluetoothctl_path()
+    if exe is None:
+        raise BmapError("bluetoothctl is required")
+
     try:
         result = subprocess.run(
-            ["bluetoothctl", "info", mac],
+            [exe, "info", mac],
             capture_output=True,
             text=True,
             timeout=5,

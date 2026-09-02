@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -54,6 +56,41 @@ def test_resolve_device_rejects_recognized_unsupported_product(monkeypatch):
     )
 
     with pytest.raises(BmapError, match="recognized but not supported"):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_resolve_device_ignores_shadow_bluetoothctl_in_path(tmp_path, monkeypatch):
+    marker = tmp_path / "marker"
+    shadow = tmp_path / "bluetoothctl"
+    shadow.write_text("#!/bin/sh\necho shadow > \"%s\"\n" % marker)
+    shadow.chmod(0o755)
+    monkeypatch.setenv(
+        "PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", "")
+    )
+    # Prove the shadow would win a PATH lookup.
+    assert shutil.which("bluetoothctl") == str(shadow)
+
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["argv0"] = args[0]
+        return completed(bluez_info())
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+
+    device = bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+    assert device.config == "qc_ultra2"
+    assert seen["argv0"] == "/usr/bin/bluetoothctl"
+    assert not marker.exists()
+
+
+def test_resolve_device_fails_closed_without_system_bluetoothctl(monkeypatch):
+    monkeypatch.setattr(
+        "pybmap.discovery.BLUETOOTHCTL", "/nonexistent/bluetoothctl"
+    )
+
+    with pytest.raises(BmapError, match="bluetoothctl is required"):
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
 

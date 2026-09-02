@@ -1,5 +1,6 @@
 """Auto-detect paired BMAP devices (Linux/macOS)."""
 
+import os
 import re
 import subprocess
 import sys
@@ -9,6 +10,18 @@ from .catalog import BMAP_UUID, lookup_device
 
 # Only a literal MAC is handed on to bluetoothctl, mirroring the C++ guard.
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+# The panel bridge never resolves executables via PATH: only this pinned
+# system path is executed, so a shadow binary earlier in PATH can never be
+# picked up by the long-lived shell on status/action requests.
+BLUETOOTHCTL = "/usr/bin/bluetoothctl"
+
+
+def bluetoothctl_path():
+    """Return the validated system bluetoothctl path, or None if unusable."""
+    if os.path.isfile(BLUETOOTHCTL) and os.access(BLUETOOTHCTL, os.X_OK):
+        return BLUETOOTHCTL
+    return None
 
 _MODALIAS_RE = re.compile(
     r"Modalias:\s*bluetooth:v[0-9A-Fa-f]{4}p([0-9A-Fa-f]{4})",
@@ -109,9 +122,12 @@ else:
 
     def _paired_macs():
         """List MAC addresses reported by `bluetoothctl devices Paired`."""
+        exe = bluetoothctl_path()
+        if exe is None:
+            return []
         try:
             result = subprocess.run(
-                ["bluetoothctl", "devices", "Paired"],
+                [exe, "devices", "Paired"],
                 capture_output=True, text=True, timeout=5,
             )
         except (OSError, subprocess.SubprocessError):
@@ -129,9 +145,12 @@ else:
 
     def _bluetoothctl_info(mac):
         """Return `bluetoothctl info` output for one MAC, or None on failure."""
+        exe = bluetoothctl_path()
+        if exe is None:
+            return None
         try:
             info = subprocess.run(
-                ["bluetoothctl", "info", mac],
+                [exe, "info", mac],
                 capture_output=True, text=True, timeout=3,
             )
         except (OSError, subprocess.SubprocessError):

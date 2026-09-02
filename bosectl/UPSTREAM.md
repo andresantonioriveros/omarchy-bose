@@ -26,6 +26,10 @@ duplicating the `bluetoothctl` parsing. Both enumeration paths share one
 `_iter_bmap_infos()` iterator with `parse_product_id()`, `has_bmap()`, and
 `is_audio_device()` helpers; per-device reads run concurrently so one wedged
 `bluetoothctl info` cannot stall the scan, and the BMAP UUID check is
-case-insensitive because BlueZ may report it in uppercase. The original MIT
+case-insensitive because BlueZ may report it in uppercase. Discovery pins
+the system executable at `/usr/bin/bluetoothctl` (`BLUETOOTHCTL`, validated
+with `bluetoothctl_path()`): the panel path never resolves executables via
+`PATH` and fails closed when the binary is missing or not executable, so a
+shadow binary cannot be picked up by the long-lived shell. The original MIT
 license is included in this directory. The runtime has no third-party
 dependencies beyond Python 3 and the system Bluetooth stack.

@@ -42,8 +42,7 @@ omarchy bar move io.github.andresariveros.omabose --section right
 
 The plugin executes its repository-owned Python bridge directly with
 `/usr/bin/python3`. It requires no elevated privileges, system configuration
-changes, package installation, commands in `PATH`, or external downloads. The
-bridge resolves the selected device's BlueZ product ID against the bundled
+changes, package installation, commands resolved via `PATH`, or external downloads. Bluetooth state is read by executing only the pinned system binary at `/usr/bin/bluetoothctl` with an argument array and timeouts; the bridge fails closed when that binary is missing or not executable, so a shadow executable earlier in `PATH` can never be picked up. The bridge resolves the selected device's BlueZ product ID against the bundled
 catalog and refuses unknown or unsupported products instead of guessing a
 protocol configuration.
 

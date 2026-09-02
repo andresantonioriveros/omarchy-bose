@@ -65,9 +65,10 @@ def fake_run_factory(infos=None, paired=PAIRED_OUTPUT, strict_macs=True):
     infos = infos if infos is not None else INFOS
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["bluetoothctl", "devices"]:
+        assert args[0] == discovery.BLUETOOTHCTL, args[0]
+        if args[1:2] == ["devices"]:
             return subprocess.CompletedProcess(args, 0, stdout=paired)
-        assert args[:2] == ["bluetoothctl", "info"]
+        assert args[1:2] == ["info"]
         mac = args[2]
         if strict_macs:
             assert discovery._MAC_RE.match(mac), mac
@@ -131,6 +132,13 @@ def test_list_bmap_devices_enriches_supported_and_unsupported(monkeypatch):
 
 
 @requires_linux
+def test_list_bmap_devices_empty_without_system_bluetoothctl(monkeypatch):
+    monkeypatch.setattr(discovery, "BLUETOOTHCTL", "/nonexistent/bluetoothctl")
+
+    assert discovery.list_bmap_devices() == []
+
+
+@requires_linux
 def test_list_bmap_devices_empty_without_bluetoothctl(monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError("bluetoothctl")
@@ -143,7 +151,8 @@ def test_list_bmap_devices_empty_without_bluetoothctl(monkeypatch):
 @requires_linux
 def test_list_bmap_devices_skips_unreadable_device(monkeypatch):
     def flaky(args, **kwargs):
-        if args[:2] == ["bluetoothctl", "devices"]:
+        assert args[0] == discovery.BLUETOOTHCTL, args[0]
+        if args[1:2] == ["devices"]:
             paired = "".join(
                 "Device %s Name\n" % mac for mac in [QC_ULTRA2, NCH_700])
             return subprocess.CompletedProcess(args, 0, stdout=paired)
