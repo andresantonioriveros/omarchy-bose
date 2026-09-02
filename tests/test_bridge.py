@@ -442,6 +442,33 @@ def test_set_cancellation_converts_to_vendor_scale():
     assert device.level == 3
 
 
+def test_set_cancellation_rejects_malformed_reading():
+    device = CncDevice()
+    device.cnc = lambda: None
+
+    with pytest.raises(BmapError, match="invalid state"):
+        bridge.set_cancellation(device, 7)
+
+
+def test_panel_status_degrades_malformed_cnc_to_unavailable():
+    device = StatusDevice()
+    device.cnc = lambda: None
+    identity = SimpleNamespace(
+        config="qc_ultra2",
+        name="QuietComfort Ultra Headphones (2nd Gen)",
+        product_id=0x4082,
+    )
+
+    status = bridge.panel_status(device, identity, "aa:bb:cc:dd:ee:ff")
+
+    assert status["battery"]["level"] == 60
+    assert status["noiseControl"] == {
+        "available": False,
+        "level": -1,
+        "maximum": 0,
+    }
+
+
 def test_scan_bose_devices_keeps_only_supported_configs(monkeypatch):
     monkeypatch.setattr(
         bridge,
