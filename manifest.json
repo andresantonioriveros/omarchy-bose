@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.andresariveros.omabose",
   "name": "Bose",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": "Andres Riveros",
   "license": "MIT",
   "description": "Bose QuietComfort battery, mode, noise-control, and equalizer panel",

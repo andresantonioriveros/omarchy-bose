@@ -9,7 +9,7 @@ and a three-band equalizer through the bundled `bosectl` implementation.
 </p>
 
 <p align="center">
-  <img src="preview-equalizer.png" width="390" alt="Omabose 0.3.2 bar icon and equalizer with Bass, Mid, and Treble controls and four presets" />
+  <img src="preview-equalizer.png" width="390" alt="Omabose 0.3.3 bar icon and equalizer with Bass, Mid, and Treble controls and four presets" />
 </p>
 
 <p align="center">
