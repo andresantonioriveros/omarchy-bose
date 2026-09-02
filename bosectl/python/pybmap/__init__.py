@@ -16,7 +16,7 @@ Usage:
 
 from .connection import BmapConnection
 from .transport import RfcommTransport
-from .discovery import find_bmap_device
+from .discovery import find_bmap_device, list_bmap_devices
 from .devices import DEVICES, get_device
 from .catalog import (
     BOSE_USB_VID, BMAP_UUID, BoseDevice, CATALOG,

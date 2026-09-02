@@ -457,8 +457,11 @@ class BmapConnection:
     def set_multipoint(self, enabled):
         """Toggle multipoint connection (bool)."""
         feat = self._feature("multipoint")
+        current = self._get_payload("multipoint")
+        if not current:
+            raise BmapDeviceError("Empty multipoint response")
         builder = feat.get("builder")
-        self._setget("multipoint", builder(enabled))
+        self._setget("multipoint", builder(enabled, current[0]))
 
     def set_auto_pause(self, enabled):
         """Toggle auto play/pause on ear removal (bool)."""

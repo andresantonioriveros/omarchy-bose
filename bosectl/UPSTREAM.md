@@ -18,5 +18,14 @@ prepends this directory's bundled `python/` path. Panel-specific product
 resolution, JSON output, and action routing live outside the vendored copy in
 the repository-root `bridge.py`.
 
-The original MIT license is included in this directory. The runtime has no
-third-party dependencies beyond Python 3 and the system Bluetooth stack.
+The plugin also carries a local BMAP `[1.10]` correction: bit 0 is parsed as
+the current multipoint state, and writes preserve the capability bits reported
+by the device. Discovery gained a local public `list_bmap_devices()` (also
+re-exported from `pybmap`) so the panel bridge reuses it instead of
+duplicating the `bluetoothctl` parsing. Both enumeration paths share one
+`_iter_bmap_infos()` iterator with `parse_product_id()`, `has_bmap()`, and
+`is_audio_device()` helpers; per-device reads run concurrently so one wedged
+`bluetoothctl info` cannot stall the scan, and the BMAP UUID check is
+case-insensitive because BlueZ may report it in uppercase. The original MIT
+license is included in this directory. The runtime has no third-party
+dependencies beyond Python 3 and the system Bluetooth stack.

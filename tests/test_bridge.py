@@ -5,12 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 import bridge
+from pybmap.catalog import BMAP_UUID
 from pybmap.errors import BmapConnectionError, BmapError
 from pybmap.types import BatteryReading, BatteryStatus, EqBand
 
 
 def bluez_info(product_id="4082", bmap=True):
-    uuid = "UUID: %s\n" % bridge.BMAP_UUID if bmap else ""
+    uuid = "UUID: %s\n" % BMAP_UUID if bmap else ""
     return "%sModalias: bluetooth:v009Ep%sd0000\n" % (uuid, product_id)
 
 
@@ -145,6 +146,11 @@ def test_panel_status_is_lean_structured_snapshot():
     assert status["mode"]["currentId"] == ""
     assert status["mode"]["currentLabel"] == "My\nCommute"
     assert status["noiseControl"] == {"available": True, "level": 7, "maximum": 10}
+    assert status["multipoint"] == {
+        "available": False,
+        "enabled": False,
+        "activeSource": None,
+    }
     assert status["equalizer"] == {"available": False, "bands": []}
     assert json.loads(json.dumps(status))["mode"]["currentLabel"] == "My\nCommute"
 
@@ -162,6 +168,65 @@ def test_panel_status_hides_unresolved_mode_index():
 
     assert status["mode"]["currentId"] == ""
     assert status["mode"]["currentLabel"] == ""
+
+
+class MultipointStatusDevice(StatusDevice):
+    def has_feature(self, name):
+        return name in ("current_mode", "cnc", "multipoint", "source")
+
+    def multipoint(self):
+        return True
+
+    def source(self):
+        return SimpleNamespace(
+            source_type="bluetooth",
+            source_mac="ac:f2:3c:35:10:de",
+        )
+
+
+def test_panel_status_includes_multipoint_and_active_source():
+    identity = SimpleNamespace(
+        config="qc_ultra2",
+        name="QuietComfort Ultra Headphones (2nd Gen)",
+        product_id=0x4082,
+    )
+
+    status = bridge.panel_status(
+        MultipointStatusDevice(), identity, "aa:bb:cc:dd:ee:ff"
+    )
+
+    assert status["multipoint"] == {
+        "available": True,
+        "enabled": True,
+        "activeSource": {
+            "type": "bluetooth",
+            "address": "AC:F2:3C:35:10:DE",
+        },
+    }
+
+
+def test_panel_status_tolerates_unavailable_multipoint_reads():
+    device = MultipointStatusDevice()
+
+    def unavailable():
+        raise BmapError("unavailable")
+
+    device.multipoint = unavailable
+    device.source = unavailable
+    identity = SimpleNamespace(
+        config="qc_ultra2",
+        name="QuietComfort Ultra Headphones (2nd Gen)",
+        product_id=0x4082,
+    )
+
+    status = bridge.panel_status(device, identity, "aa:bb:cc:dd:ee:ff")
+
+    assert status["battery"]["level"] == 60
+    assert status["multipoint"] == {
+        "available": False,
+        "enabled": False,
+        "activeSource": None,
+    }
 
 
 class EqDevice:
@@ -338,3 +403,71 @@ def test_set_cancellation_converts_to_vendor_scale():
     bridge.set_cancellation(device, 7)
 
     assert device.level == 3
+
+
+def test_scan_bose_devices_keeps_only_supported_configs(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "list_bmap_devices",
+        lambda: [
+            {
+                "address": "AA:BB:CC:DD:EE:01",
+                "productId": "0x4082",
+                "name": "QuietComfort Ultra Headphones (2nd Gen)",
+                "config": "qc_ultra2",
+                "connected": True,
+            },
+            {
+                "address": "AA:BB:CC:DD:EE:02",
+                "productId": "0x4024",
+                "name": "Noise Cancelling Headphones 700",
+                "config": None,
+                "connected": False,
+            },
+        ],
+    )
+
+    devices = bridge.scan_bose_devices()
+
+    assert devices == [
+        {
+            "address": "AA:BB:CC:DD:EE:01",
+            "productId": "0x4082",
+            "name": "QuietComfort Ultra Headphones (2nd Gen)",
+            "config": "qc_ultra2",
+            "connected": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize("command", ["scan", "list"])
+def test_scan_commands_emit_versioned_device_list(monkeypatch, capsys, command):
+    monkeypatch.setattr(
+        bridge,
+        "scan_bose_devices",
+        lambda: [
+            {
+                "address": "AA:BB:CC:DD:EE:FF",
+                "productId": "0x4082",
+                "name": "QuietComfort Ultra Headphones (2nd Gen)",
+                "config": "qc_ultra2",
+                "connected": True,
+            }
+        ],
+    )
+
+    assert bridge.main([command]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "schemaVersion": 1,
+        "devices": [
+            {
+                "address": "AA:BB:CC:DD:EE:FF",
+                "productId": "0x4082",
+                "name": "QuietComfort Ultra Headphones (2nd Gen)",
+                "config": "qc_ultra2",
+                "connected": True,
+            }
+        ],
+    }
