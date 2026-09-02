@@ -5,11 +5,15 @@ connection and battery state, with Bose listening-mode and noise-control actions
 and a three-band equalizer through the bundled `bosectl` implementation.
 
 <p align="center">
-  <img src="preview.png" width="390" alt="Omabose main panel with two Bose devices, battery levels, listening modes, and noise control" />
+  <img src="preview.png" width="390" alt="Omabose main panel with three Bose devices, earbuds battery levels, listening modes, and noise control" />
 </p>
 
 <p align="center">
   <img src="preview-equalizer.png" width="390" alt="Omabose 0.3.2 bar icon and equalizer with Bass, Mid, and Treble controls and four presets" />
+</p>
+
+<p align="center">
+  <img src="preview-qc35.png" width="390" alt="Omabose main panel with the QuietComfort 35 selected, battery level, and listening modes" />
 </p>
 
 The plugin does not use Bose cloud or account services.
