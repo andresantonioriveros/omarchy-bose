@@ -151,6 +151,12 @@ class TestReadOperations:
     def test_multipoint(self, mock_dev):
         assert mock_dev.multipoint() is True
 
+    def test_multipoint_disabled_ignores_capability_bits(self):
+        transport = MockTransport()
+        transport.add_response(1, 10, OP_STATUS, bytes([0x06]))
+        dev = BmapConnection(transport, qc_ultra2)
+        assert dev.multipoint() is False
+
     def test_sidetone(self, mock_dev):
         assert mock_dev.sidetone() == "medium"
 
@@ -232,6 +238,42 @@ class TestPublicAPI:
         with BmapConnection(transport, qc_ultra2) as dev:
             assert dev.battery() == 70
         assert transport.closed is True
+
+
+class TestMultipointWrites:
+    def test_disable_preserves_capability_bits(self):
+        transport = MockTransport()
+        transport.add_response(1, 10, OP_STATUS, bytes([0x07]))
+        dev = BmapConnection(transport, qc_ultra2)
+
+        dev.set_multipoint(False)
+
+        assert transport.sent == [
+            bytes([1, 10, OP_GET, 0]),
+            bytes([1, 10, OP_SETGET, 1, 0x06]),
+        ]
+
+    def test_enable_preserves_capability_bits(self):
+        transport = MockTransport()
+        transport.add_response(1, 10, OP_STATUS, bytes([0x06]))
+        dev = BmapConnection(transport, qc_ultra2)
+
+        dev.set_multipoint(True)
+
+        assert transport.sent == [
+            bytes([1, 10, OP_GET, 0]),
+            bytes([1, 10, OP_SETGET, 1, 0x07]),
+        ]
+
+    def test_rejects_empty_current_response(self):
+        transport = MockTransport()
+        transport.add_response(1, 10, OP_STATUS, b"")
+        dev = BmapConnection(transport, qc_ultra2)
+
+        with pytest.raises(BmapDeviceError, match="Empty multipoint response"):
+            dev.set_multipoint(True)
+
+        assert transport.sent == [bytes([1, 10, OP_GET, 0])]
 
 
 class TestPrinceAudioModes:

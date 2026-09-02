@@ -5,11 +5,15 @@ connection and battery state, with Bose listening-mode and noise-control actions
 and a three-band equalizer through the bundled `bosectl` implementation.
 
 <p align="center">
-  <img src="preview.png" width="390" alt="Omabose main panel with two Bose devices, battery levels, listening modes, and noise control" />
+  <img src="preview.png" width="390" alt="Omabose main panel with three Bose devices, earbuds battery levels, listening modes, and noise control" />
 </p>
 
 <p align="center">
-  <img src="preview-equalizer.png" width="390" alt="Omabose 0.3.2 bar icon and equalizer with Bass, Mid, and Treble controls and four presets" />
+  <img src="preview-equalizer.png" width="390" alt="Omabose 0.3.3 bar icon and equalizer with Bass, Mid, and Treble controls and four presets" />
+</p>
+
+<p align="center">
+  <img src="preview-qc35.png" width="390" alt="Omabose main panel with the QuietComfort 35 selected, battery level, and listening modes" />
 </p>
 
 The plugin does not use Bose cloud or account services.
@@ -38,8 +42,7 @@ omarchy bar move io.github.andresariveros.omabose --section right
 
 The plugin executes its repository-owned Python bridge directly with
 `/usr/bin/python3`. It requires no elevated privileges, system configuration
-changes, package installation, commands in `PATH`, or external downloads. The
-bridge resolves the selected device's BlueZ product ID against the bundled
+changes, package installation, commands resolved via `PATH`, or external downloads. Bluetooth state is read by executing only the pinned system binary at `/usr/bin/bluetoothctl` with an argument array and timeouts; the bridge fails closed when that binary is missing or not executable, so a shadow executable earlier in `PATH` can never be picked up. The bridge resolves the selected device's BlueZ product ID against the bundled
 catalog and refuses unknown or unsupported products instead of guessing a
 protocol configuration.
 

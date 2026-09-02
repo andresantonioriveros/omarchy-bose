@@ -69,7 +69,7 @@ FEATURES = {
     "multipoint": {
         "addr": (1, 10),
         "parser": parsers.parse_multipoint,
-        "builder": parsers.build_toggle,
+        "builder": parsers.build_multipoint,
     },
     "sidetone": {
         "addr": (1, 11),

@@ -11,7 +11,12 @@ Item {
   property bool active: false
   readonly property var rawDevices: Bluetooth.devices ? Bluetooth.devices.values : []
 
-  readonly property var boseDevices: Model.boseDeviceRows(rawDevices)
+  property var discoveredBoseAddresses: []
+  property string discoveryOutput: ""
+  property string discoveryError: ""
+  property bool discoveryQueued: false
+
+  readonly property var boseDevices: Model.boseDeviceRows(rawDevices, discoveredBoseAddresses)
   property string selectedAddress: ""
   property string selectedDeviceSignature: ""
   property var vendorStatus: Model.emptyStatus()
@@ -68,6 +73,18 @@ Item {
     var seconds = Number(setting("pollIntervalSec", 15))
     if (!isFinite(seconds)) seconds = 15
     return Math.max(5, Math.min(120, seconds)) * 1000
+  }
+
+  function refreshDiscovery() {
+    if (discoveryProcess.running) {
+      discoveryQueued = true
+      return
+    }
+    discoveryQueued = false
+    discoveryOutput = ""
+    discoveryError = ""
+    discoveryProcess.command = ["/usr/bin/python3", bridgePath, "scan"]
+    discoveryProcess.running = true
   }
 
   function setting(name, fallback) {
@@ -273,8 +290,10 @@ Item {
   }
   onActiveChanged: {
     vendorGeneration++
-    if (active) refreshVendor()
-    else {
+    if (active) {
+      refreshDiscovery()
+      refreshVendor()
+    } else {
       refreshQueued = false
       if (statusProcess.running) statusProcess.running = false
       if (actionProcess.running) actionProcess.running = false
@@ -292,6 +311,23 @@ Item {
     running: root.active
     onTriggered: root.refreshVendor()
   }
+
+  Timer {
+    id: discoveryDebounce
+    interval: 800
+    repeat: false
+    onTriggered: root.refreshDiscovery()
+  }
+
+  Timer {
+    id: discoveryTimer
+    interval: 30000
+    repeat: true
+    running: root.active
+    onTriggered: root.refreshDiscovery()
+  }
+
+  onRawDevicesChanged: discoveryDebounce.restart()
 
   Timer {
     id: verificationRefresh
@@ -334,6 +370,13 @@ Item {
     }
   }
 
+  Timer {
+    interval: 10000
+    repeat: false
+    running: discoveryProcess.running
+    onTriggered: discoveryProcess.running = false
+  }
+
   FileView {
     id: selectionFile
     path: root.selectionPath
@@ -342,6 +385,33 @@ Item {
     printErrors: false
     onLoaded: root.loadSelection(text())
     onLoadFailed: root.loadSelection("")
+  }
+
+  Process {
+    id: discoveryProcess
+    command: []
+    stdout: StdioCollector {
+      id: discoveryStdout
+      waitForEnd: true
+      onStreamFinished: root.discoveryOutput = text
+    }
+    stderr: StdioCollector {
+      id: discoveryStderr
+      waitForEnd: true
+      onStreamFinished: root.discoveryError = text
+    }
+    onExited: function(exitCode) {
+      var output = String(discoveryStdout.text || root.discoveryOutput || "")
+      if (exitCode === 0) {
+        var addrs = Model.parseDiscoveryAddresses(output)
+        if (!Model.sameAddresses(addrs, root.discoveredBoseAddresses))
+          root.discoveredBoseAddresses = addrs
+      }
+      // On failure or timeout the previous allowlist stays in place and the
+      // alias fallback in Model.js keeps devices visible until the next tick.
+      if (root.discoveryQueued && root.active) root.refreshDiscovery()
+      else root.discoveryQueued = false
+    }
   }
 
   Process {
@@ -450,5 +520,6 @@ Item {
   Component.onCompleted: {
     selectionFile.reload()
     reconcileDevices()
+    refreshDiscovery()
   }
 }

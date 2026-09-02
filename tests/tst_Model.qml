@@ -26,6 +26,11 @@ TestCase {
         ]
       },
       noiseControl: { available: true, level: 7, maximum: 10 },
+      multipoint: {
+        available: true,
+        enabled: true,
+        activeSource: { type: "bluetooth", address: "AC:F2:3C:35:10:DE" }
+      },
       equalizer: {
         available: true,
         bands: [
@@ -54,6 +59,10 @@ TestCase {
     compare(status.modeOptions.length, 2)
     compare(status.cnc, 7)
     compare(status.cncMax, 10)
+    verify(status.multipointAvailable)
+    verify(status.multipointEnabled)
+    compare(status.activeSourceType, "bluetooth")
+    compare(status.activeSourceAddress, "AC:F2:3C:35:10:DE")
     verify(status.eqAvailable)
     compare(status.eqBands.length, 3)
     compare(status.eqBands[0].id, "bass")
@@ -105,6 +114,19 @@ TestCase {
     verify(status.reachable)
     verify(!status.eqAvailable)
     compare(status.eqBands.length, 0)
+  }
+
+  function test_parseBridgeStatusAcceptsPayloadWithoutMultipoint() {
+    var payload = JSON.parse(bridgePayload())
+    delete payload.multipoint
+
+    var status = Model.parseBridgeStatus(JSON.stringify(payload))
+
+    verify(status.reachable)
+    verify(!status.multipointAvailable)
+    verify(!status.multipointEnabled)
+    compare(status.activeSourceType, "")
+    compare(status.activeSourceAddress, "")
   }
 
   function test_equalizerPresetsMatchOfficialValues() {

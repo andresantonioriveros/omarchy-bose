@@ -11,7 +11,8 @@ from pybmap.devices.parsers import (
     parse_sidetone, parse_voice_prompts,
     parse_mode_config_48, parse_mode_config_47,
     build_mode_config_40, build_mode_config_39,
-    build_eq_band, build_toggle, build_sidetone, build_voice_prompts,
+    build_eq_band, build_toggle, build_multipoint, build_sidetone,
+    build_voice_prompts,
     build_buttons,
 )
 from pybmap.types import ModeConfig, EqBand, ButtonMapping
@@ -188,12 +189,18 @@ class TestBuildButtons:
 
 class TestParseMultipoint:
     def test_from_capture(self):
-        # "1.10": "07" — bit 1 set (0x02), multipoint on
+        # "1.10": "07" — state and both capability bits set.
         payload = bytes.fromhex("07")
         assert parse_multipoint(payload) is True
 
     def test_disabled(self):
-        assert parse_multipoint(bytes([0x01])) is False  # bit 1 not set
+        assert parse_multipoint(bytes([0x06])) is False
+
+    def test_state_without_capability_bits(self):
+        assert parse_multipoint(bytes([0x01])) is True
+
+    def test_capability_without_state(self):
+        assert parse_multipoint(bytes([0x02])) is False
 
     def test_empty(self):
         assert parse_multipoint(bytes()) is False
@@ -370,6 +377,12 @@ class TestBuilders:
 
     def test_toggle_off(self):
         assert build_toggle(False) == bytes([0])
+
+    def test_multipoint_on_preserves_capabilities(self):
+        assert build_multipoint(True, 0x06) == bytes([0x07])
+
+    def test_multipoint_off_preserves_capabilities(self):
+        assert build_multipoint(False, 0x07) == bytes([0x06])
 
     def test_sidetone(self):
         payload = build_sidetone(2)  # medium

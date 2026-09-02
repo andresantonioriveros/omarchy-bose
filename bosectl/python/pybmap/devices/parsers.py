@@ -161,9 +161,9 @@ def build_buttons(button_id, event, action):
 
 
 def parse_multipoint(payload):
-    """Parse multipoint GET. Bit 1 (0x02) = enabled."""
+    """Parse multipoint GET. Bit 0 is the current enabled state."""
     if payload:
-        return bool(payload[0] & 0x02)
+        return bool(payload[0] & 0x01)
     return False
 
 
@@ -227,6 +227,11 @@ def build_eq_band(value, band_id):
 def build_toggle(enabled):
     """Build a boolean toggle SETGET payload."""
     return bytes([1 if enabled else 0])
+
+
+def build_multipoint(enabled, current):
+    """Build a multipoint SETGET payload while preserving capability bits."""
+    return bytes([(current & 0xFE) | (1 if enabled else 0)])
 
 
 def build_sidetone(level):

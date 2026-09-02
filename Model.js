@@ -16,6 +16,10 @@ function emptyStatus() {
     cnc: -1,
     cncMax: 0,
     cncAvailable: false,
+    multipointAvailable: false,
+    multipointEnabled: false,
+    activeSourceType: "",
+    activeSourceAddress: "",
     eqAvailable: false,
     eqBands: []
   }
@@ -55,6 +59,7 @@ function parseBridgeStatus(raw) {
   var components = battery.components || {}
   var mode = payload.mode || {}
   var noise = payload.noiseControl || {}
+  var multipoint = payload.multipoint || {}
   var equalizer = payload.equalizer || {}
 
   status.address = String(device.address || "").toUpperCase()
@@ -83,6 +88,14 @@ function parseBridgeStatus(raw) {
   status.cncAvailable = noise.available === true
   status.cnc = status.cncAvailable ? percentage(noise.level) : -1
   status.cncMax = status.cncAvailable ? Math.max(0, Math.round(Number(noise.maximum) || 0)) : 0
+  status.multipointAvailable = multipoint.available === true
+  status.multipointEnabled = status.multipointAvailable && multipoint.enabled === true
+  var activeSource = multipoint.activeSource || {}
+  status.activeSourceType = status.multipointAvailable
+    ? cleanText(activeSource.type).toLowerCase() : ""
+  var sourceAddress = normalizeAddress(activeSource.address)
+  status.activeSourceAddress = status.multipointAvailable && isMac(sourceAddress)
+    ? sourceAddress : ""
   status.eqBands = equalizer.available === true ? parseEqualizerBands(equalizer.bands) : []
   status.eqAvailable = status.eqBands.length === 3
   status.reachable = status.address !== "" && status.deviceType !== "" && status.battery >= 0
@@ -185,11 +198,59 @@ function textFor(device) {
   return [device.name, device.deviceName].join(" ").toLowerCase()
 }
 
-function isBoseDevice(device) {
+var MAC_RE = /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/
+
+function normalizeAddress(value) {
+  return String(value || "").toUpperCase()
+}
+
+function isMac(value) {
+  return MAC_RE.test(normalizeAddress(value))
+}
+
+function isBoseAddress(device, allowed) {
+  if (!device || !device.address || !allowed) return false
+  var wanted = normalizeAddress(device.address)
+  if (!isMac(wanted)) return false
+  for (var i = 0; i < allowed.length; i++) {
+    if (normalizeAddress(allowed[i]) === wanted) return true
+  }
+  return false
+}
+
+// The discovery allowlist (BMAP UUID + product ID) is authoritative. Name
+// matching below is only a fallback so a device still shows while discovery
+// is failing or stale — aliases are user-renamable and can false-positive.
+function isBoseDevice(device, allowed) {
+  if (isBoseAddress(device, allowed)) return true
   var text = textFor(device)
   return text.indexOf("bose") >= 0
     || text.indexOf("quietcomfort") >= 0
-    || /(^|[^a-z0-9])qc([^a-z0-9]|$)/.test(text)
+    || /(^|[^a-z0-9])qc[0-9]*([^a-z0-9]|$)/.test(text)
+}
+
+function parseDiscoveryAddresses(raw) {
+  try {
+    var payload = JSON.parse(String(raw || ""))
+    if (!payload || Number(payload.schemaVersion) !== 1) return []
+    var devices = Array.isArray(payload.devices) ? payload.devices : []
+    var addrs = []
+    for (var i = 0; i < devices.length; i++) {
+      var address = normalizeAddress(devices[i] && devices[i].address)
+      if (isMac(address)) addrs.push(address)
+    }
+    return addrs.sort()
+  } catch (e) {
+    return []
+  }
+}
+
+function sameAddresses(a, b) {
+  if (!a || !b || a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
 }
 
 function isEarbuds(device) {
@@ -237,12 +298,12 @@ function toArray(values) {
   return result
 }
 
-function boseDeviceRows(values) {
+function boseDeviceRows(values, allowed) {
   var devices = toArray(values)
   var rows = []
   for (var i = 0; i < devices.length; i++) {
     var device = devices[i]
-    if (!device || !isBoseDevice(device)) continue
+    if (!device || !isBoseDevice(device, allowed)) continue
     if (!(device.connected || device.paired || device.bonded || device.trusted)) continue
     rows.push(deviceSnapshot(device))
   }
@@ -250,9 +311,9 @@ function boseDeviceRows(values) {
 }
 
 function deviceForAddress(devices, address) {
-  var wanted = String(address || "").toUpperCase()
+  var wanted = normalizeAddress(address)
   for (var i = 0; devices && i < devices.length; i++) {
-    if (String(devices[i].address || "").toUpperCase() === wanted) return devices[i]
+    if (normalizeAddress(devices[i].address) === wanted) return devices[i]
   }
   return null
 }

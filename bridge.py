@@ -14,15 +14,17 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "bosectl" / "python"))
 
 import pybmap
-from pybmap.catalog import BMAP_UUID, lookup_device
+from pybmap.discovery import (
+    bluetoothctl_path,
+    bose_identity,
+    has_bmap,
+    list_bmap_devices,
+)
 from pybmap.errors import BmapConnectionError, BmapError
 
 
 SCHEMA_VERSION = 1
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
-PRODUCT_RE = re.compile(
-    r"Modalias:\s*bluetooth:v[0-9A-Fa-f]{4}p([0-9A-Fa-f]{4})"
-)
 CONNECTION_RETRY_DELAYS = (0.5, 1.0, 1.5)
 EQ_BANDS = (
     (0, "bass", "Bass"),
@@ -38,9 +40,15 @@ def resolve_device(mac):
     if not MAC_RE.fullmatch(mac or ""):
         raise BmapError("Invalid Bluetooth address")
 
+    # Pinned system path only: never resolve bluetoothctl via PATH, so a
+    # shadow binary cannot be picked up on panel status/action requests.
+    exe = bluetoothctl_path()
+    if exe is None:
+        raise BmapError("bluetoothctl is required")
+
     try:
         result = subprocess.run(
-            ["bluetoothctl", "info", mac],
+            [exe, "info", mac],
             capture_output=True,
             text=True,
             timeout=5,
@@ -55,15 +63,12 @@ def resolve_device(mac):
         raise BmapError(detail or "Bluetooth device was not found")
 
     info = result.stdout
-    if BMAP_UUID.lower() not in info.lower():
+    if not has_bmap(info):
         raise BmapError("The selected device does not advertise Bose BMAP")
 
-    match = PRODUCT_RE.search(info)
-    if not match:
+    product_id, device = bose_identity(info)
+    if product_id is None:
         raise BmapError("The selected device has no Bose product identifier")
-
-    product_id = int(match.group(1), 16)
-    device = lookup_device(product_id)
     if device is None:
         raise BmapError("Unknown Bose product 0x%04X" % product_id)
     if device.config is None:
@@ -151,6 +156,30 @@ def equalizer_status(device):
     return {"available": True, "bands": bands}
 
 
+def multipoint_status(device):
+    """Read optional multipoint state without making panel status depend on it."""
+    enabled = (
+        safe_read(device.multipoint, None)
+        if device.has_feature("multipoint") else None
+    )
+    source = (
+        safe_read(device.source, None)
+        if device.has_feature("source") else None
+    )
+    active_source = None
+    if source is not None:
+        address = str(getattr(source, "source_mac", "") or "").upper()
+        active_source = {
+            "type": str(getattr(source, "source_type", "") or "").lower(),
+            "address": address if MAC_RE.fullmatch(address) else "",
+        }
+    return {
+        "available": isinstance(enabled, bool) or active_source is not None,
+        "enabled": enabled if isinstance(enabled, bool) else False,
+        "activeSource": active_source,
+    }
+
+
 def panel_status(device, identity, mac):
     """Read only the status fields rendered by the panel."""
     battery = device.battery_status()
@@ -175,8 +204,13 @@ def panel_status(device, identity, mac):
     current_label = "" if re.fullmatch(r"unknown\(\d+\)", mode_key) else normalized_mode
 
     noise_available = device.has_feature("cnc")
-    cnc_level, cnc_max = safe_read(device.cnc, (-1, 0)) if noise_available else (-1, 0)
-    cancellation = cnc_max - cnc_level if cnc_level >= 0 else -1
+    try:
+        cnc_level, cnc_max = device.cnc() if noise_available else (-1, 0)
+        cancellation = cnc_max - cnc_level if cnc_level >= 0 else -1
+    except (BmapError, TypeError, ValueError):
+        # A malformed optional reading must degrade to unavailable,
+        # mirroring equalizer_status, never fail the whole snapshot.
+        cnc_level, cnc_max, cancellation = -1, 0, -1
 
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -200,6 +234,7 @@ def panel_status(device, identity, mac):
             "level": cancellation,
             "maximum": cnc_max,
         },
+        "multipoint": multipoint_status(device),
         "equalizer": equalizer_status(device),
     }
 
@@ -216,7 +251,10 @@ def set_mode(device, mode):
 def set_cancellation(device, level):
     if not device.has_feature("cnc"):
         raise BmapError("Noise control is not supported by this device")
-    _, maximum = device.cnc()
+    try:
+        _, maximum = device.cnc()
+    except (TypeError, ValueError) as error:
+        raise BmapError("Noise control returned invalid state") from error
     if level < 0 or level > maximum:
         raise ValueError("Cancellation level must be 0-%d" % maximum)
     device.set_cnc(maximum - level)
@@ -236,9 +274,22 @@ def set_equalizer(device, bass, mid, treble):
     device.set_eq(bass, mid, treble)
 
 
+def scan_bose_devices():
+    """Enumerate paired Bose devices via bosectl discovery.
+
+    Returns a list of dicts with address, productId, name, config, connected.
+    Only devices with an implemented pybmap config are listed, matching
+    resolve_device: recognized-but-unsupported products stay out of the
+    allowlist (Model.js may still show them via the alias fallback, and
+    selecting one reports it as unsupported). This is the authoritative
+    allowlist for Model.js filtering.
+    """
+    return [device for device in list_bmap_devices() if device["config"] is not None]
+
+
 def argument_parser():
     parser = argparse.ArgumentParser(description="Omabose panel bridge")
-    parser.add_argument("--mac", required=True, help="selected Bluetooth address")
+    parser.add_argument("--mac", required=False, help="selected Bluetooth address")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
 
@@ -252,12 +303,24 @@ def argument_parser():
     equalizer.add_argument("bass", type=int)
     equalizer.add_argument("mid", type=int)
     equalizer.add_argument("treble", type=int)
+    # "scan" is the name the panel invokes; "list" is an alias for shell use.
+    commands.add_parser("scan")
+    commands.add_parser("list")
     return parser
 
 
 def main(argv=None):
     args = argument_parser().parse_args(argv)
     try:
+        if args.command in ("scan", "list"):
+            devices = scan_bose_devices()
+            print(json.dumps(
+                {"schemaVersion": SCHEMA_VERSION, "devices": devices},
+                separators=(",", ":"),
+            ))
+            return 0
+        if not args.mac or not MAC_RE.fullmatch(args.mac):
+            raise BmapError("Invalid Bluetooth address")
         identity = resolve_device(args.mac)
         with connect_device(args.mac, identity.config) as device:
             if args.command == "status":
@@ -268,7 +331,7 @@ def main(argv=None):
                 set_cancellation(device, args.level)
             elif args.command == "eq":
                 set_equalizer(device, args.bass, args.mid, args.treble)
-    except (BmapError, OSError, ValueError) as error:
+    except (BmapError, OSError, ValueError, TypeError) as error:
         print("Omabose: %s" % error, file=sys.stderr)
         return 1
     return 0
