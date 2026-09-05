@@ -39,4 +39,7 @@ Local addition on top of the vendored copy: `python/pybmap/subproc.py`
 `bridge.py`. `bluetoothctl` echoes device-set fields, so its output is
 untrusted: the helper retains at most 64 KiB across stdout/stderr combined,
 kills the child past the cap, and preserves timeout and fail-closed behavior
-it replaces. Undecodable bytes degrade to U+FFFD instead of raising.
+it replaces. Undecodable bytes degrade to U+FFFD instead of raising. The
+module also tracks the in-flight child and offers
+`install_terminate_forwarding()`, which the bridge installs at startup so
+its SIGTERM SIGKILLs the `bluetoothctl` grandchild instead of orphaning it.

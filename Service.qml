@@ -535,4 +535,16 @@ Item {
     reconcileDevices()
     refreshDiscovery()
   }
+
+  Component.onDestruction: {
+    // Reap path: a disabled or removed plugin must not leave bridge or
+    // bluetoothctl processes behind. Stopping here sends SIGTERM, which
+    // the bridge forwards down to its own child, so the whole tree dies
+    // together; anything wedged past signals is unreachable by definition
+    // and expires on its own timeouts. Best effort by nature -- teardown
+    // does not wait -- which is why every call below is also bounded.
+    if (discoveryProcess.running) discoveryProcess.running = false
+    if (statusProcess.running) statusProcess.running = false
+    if (actionProcess.running) actionProcess.running = false
+  }
 }

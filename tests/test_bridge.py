@@ -1,14 +1,18 @@
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import bridge
+from pybmap import subproc
 from pybmap.catalog import BMAP_UUID
 from pybmap.errors import BmapConnectionError, BmapError
 from pybmap.types import BatteryReading, BatteryStatus, EqBand
@@ -142,6 +146,67 @@ def test_hostile_loader_env_fails_closed(tmp_path, monkeypatch):
 
     with pytest.raises(BmapError):
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def _sleep_grandchildren():
+    """Pids running our probe sleep: the only grandchildren these tests make."""
+    found = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as handle:
+                cmdline = handle.read().replace(b"\0", b" ").decode(
+                    "utf-8", "replace"
+                )
+        except OSError:
+            continue
+        if "time.sleep(60)" in cmdline:
+            found.append(pid)
+    return found
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX signals and /proc")
+def test_sigterm_forwards_to_child_and_exits_fast(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "subproc.run_capped(\n"
+        + "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        + "    timeout=60,\n"
+        + ")\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(driver)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not _sleep_grandchildren():
+            time.sleep(0.1)
+        assert _sleep_grandchildren(), "sleep grandchild never spawned"
+
+        start = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        assert time.monotonic() - start < 10
+        assert _sleep_grandchildren() == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_current_child_cleared_after_run():
+    subproc.run_capped(
+        [sys.executable, "-c", "print('hi')"], timeout=10
+    )
+    assert subproc._current_child is None
 
 
 def test_resolve_device_truncates_hostile_error_detail(monkeypatch):

@@ -21,7 +21,11 @@ from pybmap.discovery import (
     list_bmap_devices,
 )
 from pybmap.errors import BmapConnectionError, BmapError
-from pybmap.subproc import OutputTooLarge, run_capped
+from pybmap.subproc import (
+    OutputTooLarge,
+    install_terminate_forwarding,
+    run_capped,
+)
 
 
 SCHEMA_VERSION = 1
@@ -333,6 +337,9 @@ def argument_parser():
 
 
 def main(argv=None):
+    # The shell stops us with SIGTERM; forward it to the bluetoothctl
+    # grandchild (if any) instead of orphaning it. See subproc.
+    install_terminate_forwarding()
     args = argument_parser().parse_args(argv)
     try:
         if args.command in ("scan", "list"):

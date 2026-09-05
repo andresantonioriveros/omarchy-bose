@@ -9,11 +9,48 @@ overflow kills the child and raises `OutputTooLarge`, which callers already
 treat as failure because it subclasses `subprocess.SubprocessError`.
 """
 
+import os
+import signal
 import subprocess
 import threading
 import time
 
 DEFAULT_MAX_BYTES = 65536
+
+# The direct child currently held by run_capped, if any, so a SIGTERM for
+# us can be forwarded down instead of orphaning it. Written under the GIL;
+# run_capped is never reentrant in one process. The spawn-to-assignment
+# window is a couple of bytecodes wide and accepted as is: masking SIGTERM
+# around it would leak the mask into the child, whose own disposition must
+# stay default, and an orphan there still expires on the call timeouts.
+_current_child = None
+
+
+def install_terminate_forwarding():
+    """Forward SIGTERM to the current run_capped child, then exit.
+
+    Installed by the panel bridge at startup: the shell stops children
+    with SIGTERM, and without forwarding the bluetoothctl grandchild
+    would be orphaned. The child gets SIGKILL -- we are exiting anyway,
+    so politeness buys nothing -- and os._exit skips cleanup that could
+    itself hang on teardown (a BlueZ close over a wedged socket). Exit
+    status 143 matches a default SIGTERM death, so callers observe no
+    difference. No-op where SIGTERM is unavailable.
+    """
+    try:
+        signal.signal(signal.SIGTERM, _forward_terminate)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _forward_terminate(signum, frame):
+    child = _current_child
+    if child is not None:
+        try:
+            child.kill()
+        except OSError:
+            pass
+    os._exit(128 + signum)
 
 
 class OutputTooLarge(subprocess.SubprocessError):
@@ -55,6 +92,8 @@ def run_capped(argv, *, timeout, max_bytes=DEFAULT_MAX_BYTES):
         encoding="utf-8",
         errors="replace",
     )
+    global _current_child
+    _current_child = proc
     buffers = {proc.stdout: [], proc.stderr: []}
     state = {"total": 0, "overflow": False}
     lock = threading.Lock()
@@ -85,6 +124,10 @@ def run_capped(argv, *, timeout, max_bytes=DEFAULT_MAX_BYTES):
     def _close_pipes():
         # Deterministic teardown: refcount timing otherwise leaves these to
         # the cyclic collector, which is exactly the unclosed-file warning.
+        # Also releases the terminate-forwarding slot: from here on a
+        # SIGTERM finds no child to forward to and just exits.
+        global _current_child
+        _current_child = None
         for pipe in buffers:
             try:
                 pipe.close()
