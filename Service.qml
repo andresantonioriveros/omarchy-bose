@@ -32,10 +32,10 @@ Item {
   property string statusError: ""
   property string actionOutput: ""
   property string actionError: ""
+  property string selectionLoadOutput: ""
   property bool statusTimedOut: false
   property bool actionTimedOut: false
 
-  readonly property string selectionPath: Quickshell.env("HOME") + "/.local/state/omarchy/omabose.json"
   property bool selectionLoaded: false
   property string preferredAddress: ""
 
@@ -113,10 +113,19 @@ Item {
     reconcileDevices()
   }
 
+  function runSelectionLoad() {
+    if (selectionLoadProcess.running) return
+    selectionLoadOutput = ""
+    selectionLoadProcess.command = ["/usr/bin/python3", bridgePath, "selection-load"]
+    selectionLoadProcess.running = true
+  }
+
   function flushSelection() {
-    if (!selectionLoaded) return
-    var payload = preferredAddress ? { selectedAddress: preferredAddress.toUpperCase() } : {}
-    selectionFile.setText(JSON.stringify(payload, null, 2) + "\n")
+    if (!selectionLoaded || selectionSaveProcess.running) return
+    var args = ["selection-save"]
+    if (preferredAddress) args.push("--mac", preferredAddress.toUpperCase())
+    selectionSaveProcess.command = ["/usr/bin/python3", bridgePath].concat(args)
+    selectionSaveProcess.running = true
   }
 
   function reconcileDevices() {
@@ -377,14 +386,32 @@ Item {
     onTriggered: discoveryProcess.running = false
   }
 
-  FileView {
-    id: selectionFile
-    path: root.selectionPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.loadSelection(text())
-    onLoadFailed: root.loadSelection("")
+  // Selection persistence lives in the bridge, where the path itself can
+  // be validated (regular file, owned by us, no symlinks, size-capped)
+  // instead of trusting FileView blindly. Load always succeeds with a
+  // (possibly empty) document; save fails loudly on invalid input.
+  Process {
+    id: selectionLoadProcess
+    clearEnvironment: true
+    environment: ({})
+    command: []
+    stdout: StdioCollector {
+      id: selectionLoadStdout
+      waitForEnd: true
+      onStreamFinished: root.selectionLoadOutput = text
+    }
+    onExited: function(exitCode) {
+      root.loadSelection(exitCode === 0
+        ? String(selectionLoadStdout.text || root.selectionLoadOutput || "")
+        : "")
+    }
+  }
+
+  Process {
+    id: selectionSaveProcess
+    clearEnvironment: true
+    environment: ({})
+    command: []
   }
 
   // Child processes start with a scrubbed environment: the bridge reads
@@ -531,7 +558,7 @@ Item {
   }
 
   Component.onCompleted: {
-    selectionFile.reload()
+    runSelectionLoad()
     reconcileDevices()
     refreshDiscovery()
   }
@@ -546,5 +573,7 @@ Item {
     if (discoveryProcess.running) discoveryProcess.running = false
     if (statusProcess.running) statusProcess.running = false
     if (actionProcess.running) actionProcess.running = false
+    if (selectionLoadProcess.running) selectionLoadProcess.running = false
+    if (selectionSaveProcess.running) selectionSaveProcess.running = false
   }
 }

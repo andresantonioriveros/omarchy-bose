@@ -3,9 +3,12 @@
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -37,7 +40,94 @@ OUTPUT_CAP_BYTES = 65536
 # bluetoothctl stderr on failure is device-influenced free text echoed into
 # our one-line errors: keep the gist, drop the rest.
 ERROR_DETAIL_LIMIT = 500
+# The persisted selection is one tiny JSON document; anything bigger is not
+# ours. All checks below run against the opened fd (never a re-looked-up
+# path), so a swap between check and use cannot redirect them.
+SELECTION_MAX_BYTES = 4096
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def selection_path():
+    """Where the panel persists the explicitly selected device address."""
+    return Path.home() / ".local" / "state" / "omarchy" / "omabose.json"
+
+
+def selection_load():
+    """Read the persisted selection, degrading to empty on any problem.
+
+    Missing, oversized, non-regular, foreign-owned, symlinked, or
+    unparsable state all mean the same thing: no usable preference.
+    Returns {"selectedAddress": mac-or-""}.
+    """
+    try:
+        fd = os.open(selection_path(), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return {"selectedAddress": ""}
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_size > SELECTION_MAX_BYTES
+        ):
+            return {"selectedAddress": ""}
+        # Regular files return up to the request in one read; anything past
+        # the cap means the file grew under us, which also refuses.
+        raw = os.read(fd, SELECTION_MAX_BYTES + 1)
+        text = raw.decode("utf-8", "replace")
+    except OSError:
+        return {"selectedAddress": ""}
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if len(raw) > SELECTION_MAX_BYTES:
+        return {"selectedAddress": ""}
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return {"selectedAddress": ""}
+    addr = str((obj or {}).get("selectedAddress") or "").upper()
+    return {"selectedAddress": addr if MAC_RE.fullmatch(addr) else ""}
+
+
+def selection_save(mac):
+    """Persist the explicitly selected device address, atomically.
+
+    Empty mac clears the preference. Refuses anything that is not a MAC
+    (raising, for the CLI caller to report).
+    Writes to a fresh O_EXCL temp file (0600) and renames over the state
+    path, so a pre-existing symlink is replaced rather than followed and
+    a partial write can never be observed.
+    """
+    if mac and not MAC_RE.fullmatch(mac):
+        raise BmapError("Invalid Bluetooth address")
+    payload = {"selectedAddress": mac.upper()} if mac else {}
+    # Same shape the panel historically wrote, so existing state keeps
+    # working byte for byte.
+    text = json.dumps(payload, indent=2) + "\n"
+    path = selection_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".omabose-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 CONNECTION_RETRY_DELAYS = (0.5, 1.0, 1.5)
 EQ_BANDS = (
     (0, "bass", "Bass"),
@@ -333,6 +423,13 @@ def argument_parser():
     # "scan" is the name the panel invokes; "list" is an alias for shell use.
     commands.add_parser("scan")
     commands.add_parser("list")
+    commands.add_parser("selection-load")
+    save = commands.add_parser("selection-save")
+    save.add_argument(
+        "--mac",
+        required=False,
+        help="selected Bluetooth address (omit to clear the preference)",
+    )
     return parser
 
 
@@ -345,6 +442,12 @@ def main(argv=None):
         if args.command in ("scan", "list"):
             devices = scan_bose_devices()
             emit_json({"schemaVersion": SCHEMA_VERSION, "devices": devices})
+            return 0
+        if args.command == "selection-load":
+            emit_json(selection_load())
+            return 0
+        if args.command == "selection-save":
+            selection_save(args.mac or "")
             return 0
         if not args.mac or not MAC_RE.fullmatch(args.mac):
             raise BmapError("Invalid Bluetooth address")

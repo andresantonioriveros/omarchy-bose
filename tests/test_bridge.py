@@ -687,3 +687,110 @@ def test_scan_commands_emit_versioned_device_list(monkeypatch, capsys, command):
             }
         ],
     }
+
+
+def _selection_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _selection_path(home):
+    return home / ".local" / "state" / "omarchy" / "omabose.json"
+
+
+def test_selection_load_missing_is_empty(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_roundtrip_creates_parents_and_locks_mode(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+
+    bridge.selection_save("aa:bb:cc:dd:ee:ff")
+    path = _selection_path(home)
+    assert path.read_text() == '{\n  "selectedAddress": "AA:BB:CC:DD:EE:FF"\n}\n'
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:FF"}
+
+    bridge.selection_save("")
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_oversized(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).write_text('{"selectedAddress": "' + "A" * 5000 + '"}')
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_symlink(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    target = tmp_path / "target.json"
+    target.write_text('{"selectedAddress": "AA:BB:CC:DD:EE:01"}')
+    _selection_path(home).symlink_to(target)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    assert json.loads(target.read_text())["selectedAddress"] == "AA:BB:CC:DD:EE:01"
+
+
+def test_selection_load_rejects_nonregular_and_unparsable(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).mkdir()
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).rmdir()
+    _selection_path(home).write_text("not json{")
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).write_text('{"selectedAddress": "bogus"}')
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).write_text('{"other": 1}')
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_foreign_owner(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:01"}
+
+    real_uid = os.getuid()
+    monkeypatch.setattr(bridge.os, "getuid", lambda: real_uid + 1)
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_save_rejects_bad_mac(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+
+    with pytest.raises(BmapError, match="Invalid Bluetooth address"):
+        bridge.selection_save("not-a-mac")
+    assert not _selection_path(home).exists()
+
+
+def test_selection_save_replaces_symlink_without_following(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    target = tmp_path / "victim.json"
+    target.write_text("precious")
+    _selection_path(home).symlink_to(target)
+
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+
+    assert target.read_text() == "precious"
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:01"}
+
+
+def test_selection_commands_end_to_end(tmp_path, monkeypatch, capsys):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.main(["selection-load"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"selectedAddress": ""}
+    assert bridge.main(["selection-save", "--mac", "AA:BB:CC:DD:EE:01"]) == 0
+    assert bridge.main(["selection-save", "--mac", "nope"]) == 1
+    assert bridge.main(["selection-load"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "selectedAddress": "AA:BB:CC:DD:EE:01"
+    }
