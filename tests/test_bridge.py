@@ -108,6 +108,42 @@ def test_resolve_device_fails_closed_on_gushing_bluetoothctl(tmp_path, monkeypat
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
 
+def test_panel_path_needs_no_environment(tmp_path, monkeypatch):
+    # The panel launches children with a scrubbed environment: prove the
+    # panel path functions with nothing in it at all. Note this must empty
+    # the real process environment, not just rebind os.environ -- execve
+    # with env=None inherits the C-level environ either way, which is
+    # exactly why the scrubbing has to happen panel-side. (A Python stub
+    # would self-report LC_CTYPE, and shells self-add PWD/SHLVL, so the
+    # assertion is function -- not byte-identical emptiness.)
+    for key in list(os.environ):
+        monkeypatch.delenv(key, raising=False)
+    assert bridge.bluetoothctl_path() in (None, "/usr/bin/bluetoothctl")
+
+    stub = tmp_path / "probe"
+    stub.write_text("#!%s\nprint('ok')\n" % sys.executable)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    result = bridge.run_capped([str(stub)], timeout=5)
+    assert result.returncode == 0
+    assert result.stdout == "ok\n"
+
+
+def test_hostile_loader_env_fails_closed(tmp_path, monkeypatch):
+    # LD_PRELOAD / PYTHONPATH poison hits every child at exec time; the
+    # bridge must still fail closed as BmapError, never crash or hang.
+    monkeypatch.setenv("LD_PRELOAD", "/nonexistent/evil.so")
+    monkeypatch.setenv("PYTHONPATH", "/nonexistent/evil")
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('x')\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr("pybmap.discovery.BLUETOOTHCTL", str(stub))
+
+    with pytest.raises(BmapError):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
 def test_resolve_device_truncates_hostile_error_detail(monkeypatch):
     def hostile(args, **kwargs):
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="E" * 5000)

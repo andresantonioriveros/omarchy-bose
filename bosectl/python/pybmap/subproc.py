@@ -50,6 +50,9 @@ def run_capped(argv, *, timeout, max_bytes=DEFAULT_MAX_BYTES):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        # Explicit UTF-8: BlueZ speaks UTF-8, and the panel launches us with
+        # a scrubbed environment where locale detection would land on ASCII.
+        encoding="utf-8",
         errors="replace",
     )
     buffers = {proc.stdout: [], proc.stderr: []}

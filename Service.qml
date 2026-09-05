@@ -387,14 +387,17 @@ Item {
     onLoadFailed: root.loadSelection("")
   }
 
-  // These collectors buffer to end-of-stream, which is safe because the
-  // producer is capped: bridge.py refuses to print past OUTPUT_CAP_BYTES
-  // and Model.js refuses to parse past MAX_JSON_BYTES, so a compromised
-  // child degrades to the stale/empty states below instead of growing here.
-  // Keep MAX_JSON_BYTES == OUTPUT_CAP_BYTES: bump them together or the
-  // tighter one silently decides for both.
+  // Child processes start with a scrubbed environment: the bridge reads
+  // nothing from env (absolute paths everywhere, explicit UTF-8 decoding),
+  // so ambient variables like LD_PRELOAD or PYTHONPATH cannot reach it or
+  // the bluetoothctl it spawns. Buffering to end-of-stream stays safe
+  // because the producer is capped and the parsers refuse past
+  // MAX_JSON_BYTES (kept equal to OUTPUT_CAP_BYTES). A compromised child
+  // degrades to the stale/empty states below instead of growing here.
   Process {
     id: discoveryProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: StdioCollector {
       id: discoveryStdout
@@ -422,6 +425,8 @@ Item {
 
   Process {
     id: statusProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: StdioCollector {
       id: statusStdout
@@ -490,6 +495,8 @@ Item {
 
   Process {
     id: actionProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: StdioCollector {
       id: actionStdout
