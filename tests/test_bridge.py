@@ -1,7 +1,9 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +27,7 @@ def completed(stdout="", stderr="", returncode=0):
 
 def test_resolve_device_uses_bluez_product_id(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess, "run", lambda *args, **kwargs: completed(bluez_info())
+        bridge, "run_capped", lambda *args, **kwargs: completed(bluez_info())
     )
 
     device = bridge.resolve_device("E4:58:BC:D4:97:95")
@@ -41,7 +43,7 @@ def test_resolve_device_rejects_invalid_mac(mac):
 
 def test_resolve_device_rejects_non_bmap_device(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess, "run", lambda *args, **kwargs: completed(bluez_info(bmap=False))
+        bridge, "run_capped", lambda *args, **kwargs: completed(bluez_info(bmap=False))
     )
 
     with pytest.raises(BmapError, match="does not advertise Bose BMAP"):
@@ -50,8 +52,8 @@ def test_resolve_device_rejects_non_bmap_device(monkeypatch):
 
 def test_resolve_device_rejects_recognized_unsupported_product(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess,
-        "run",
+        bridge,
+        "run_capped",
         lambda *args, **kwargs: completed(bluez_info(product_id="4024")),
     )
 
@@ -76,7 +78,7 @@ def test_resolve_device_ignores_shadow_bluetoothctl_in_path(tmp_path, monkeypatc
         seen["argv0"] = args[0]
         return completed(bluez_info())
 
-    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(bridge, "run_capped", fake_run)
 
     device = bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
@@ -91,6 +93,18 @@ def test_resolve_device_fails_closed_without_system_bluetoothctl(monkeypatch):
     )
 
     with pytest.raises(BmapError, match="bluetoothctl is required"):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_resolve_device_fails_closed_on_gushing_bluetoothctl(tmp_path, monkeypatch):
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('A' * 300000)\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr("pybmap.discovery.BLUETOOTHCTL", str(stub))
+
+    with pytest.raises(BmapError, match="too much data"):
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
 
