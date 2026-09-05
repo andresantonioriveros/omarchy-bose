@@ -1,6 +1,9 @@
 """Tests for user-visible CLI output."""
 
-from pybmap.cli import cmd_status
+import stat
+import sys
+
+from pybmap.cli import _git_hash, cmd_status
 from pybmap.types import BatteryReading, DeviceStatus
 
 
@@ -54,3 +57,14 @@ def test_device_status_preserves_old_positional_shape():
     )
     assert status.mode == "quiet"
     assert status.battery_readings == ()
+
+
+def test_git_hash_falls_back_on_gushing_git(tmp_path, monkeypatch):
+    stub = tmp_path / "git"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('g' * 1000000)\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert _git_hash() == "unknown"

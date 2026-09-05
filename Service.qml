@@ -387,8 +387,17 @@ Item {
     onLoadFailed: root.loadSelection("")
   }
 
+  // Child processes start with a scrubbed environment: the bridge reads
+  // nothing from env (absolute paths everywhere, explicit UTF-8 decoding),
+  // so ambient variables like LD_PRELOAD or PYTHONPATH cannot reach it or
+  // the bluetoothctl it spawns. Buffering to end-of-stream stays safe
+  // because the producer is capped and the parsers refuse past
+  // MAX_JSON_BYTES (kept equal to OUTPUT_CAP_BYTES). A compromised child
+  // degrades to the stale/empty states below instead of growing here.
   Process {
     id: discoveryProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: StdioCollector {
       id: discoveryStdout
@@ -416,6 +425,8 @@ Item {
 
   Process {
     id: statusProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: StdioCollector {
       id: statusStdout
@@ -484,6 +495,8 @@ Item {
 
   Process {
     id: actionProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: StdioCollector {
       id: actionStdout
@@ -521,5 +534,17 @@ Item {
     selectionFile.reload()
     reconcileDevices()
     refreshDiscovery()
+  }
+
+  Component.onDestruction: {
+    // Reap path: a disabled or removed plugin must not leave bridge or
+    // bluetoothctl processes behind. Stopping here sends SIGTERM, which
+    // the bridge forwards down to its own child, so the whole tree dies
+    // together; anything wedged past signals is unreachable by definition
+    // and expires on its own timeouts. Best effort by nature -- teardown
+    // does not wait -- which is why every call below is also bounded.
+    if (discoveryProcess.running) discoveryProcess.running = false
+    if (statusProcess.running) statusProcess.running = false
+    if (actionProcess.running) actionProcess.running = false
   }
 }
