@@ -81,6 +81,29 @@ def test_timeout_still_fires_with_partial_output():
     assert caught.value.output == "part\n"
 
 
+def test_timeout_partials_stay_within_cap():
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        run_capped(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time; sys.stdout.write('P' * 50); "
+                "sys.stdout.flush(); time.sleep(30)",
+            ],
+            timeout=1,
+            max_bytes=100,
+        )
+    assert caught.value.output == "P" * 50
+
+
+def test_stdin_is_devnull():
+    result = run_capped(
+        [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"],
+        timeout=10,
+    )
+    assert result.stdout == "''\n"
+
+
 def test_undecodable_bytes_degrade_instead_of_raising():
     result = run_capped(
         [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff\\xfe' * 64)"],

@@ -32,14 +32,21 @@ def run_capped(argv, *, timeout, max_bytes=DEFAULT_MAX_BYTES):
     instead of crashing the bridge.
 
     The cap counts decoded characters across both streams combined, so a
-    flood cannot dodge it by splitting across stdout and stderr. Every wait
-    after a kill is itself bounded: a child wedged in uninterruptible
-    Bluetooth I/O ignores SIGKILL, and the caller must still get its
-    exception instead of hanging with it (drain threads are daemon, so
-    abandoning them cannot block interpreter teardown).
+    flood cannot dodge it by splitting across stdout and stderr. Retained
+    output never exceeds max_bytes on any path: a chunk is kept only when
+    the running total stays within the cap afterwards, so anything bigger
+    trips overflow first -- this holds for returned payloads and for the
+    partials carried by TimeoutExpired alike, and neither caller parses
+    the latter anyway. Stdin is /dev/null, so a child can neither block
+    on input nor inherit a terminal. Every wait after a kill is itself
+    bounded: a child wedged in uninterruptible Bluetooth I/O ignores
+    SIGKILL, and the caller must still get its exception instead of
+    hanging with it (drain threads are daemon, so abandoning them cannot
+    block interpreter teardown).
     """
     proc = subprocess.Popen(
         argv,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
