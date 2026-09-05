@@ -1,7 +1,9 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +27,7 @@ def completed(stdout="", stderr="", returncode=0):
 
 def test_resolve_device_uses_bluez_product_id(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess, "run", lambda *args, **kwargs: completed(bluez_info())
+        bridge, "run_capped", lambda *args, **kwargs: completed(bluez_info())
     )
 
     device = bridge.resolve_device("E4:58:BC:D4:97:95")
@@ -41,7 +43,7 @@ def test_resolve_device_rejects_invalid_mac(mac):
 
 def test_resolve_device_rejects_non_bmap_device(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess, "run", lambda *args, **kwargs: completed(bluez_info(bmap=False))
+        bridge, "run_capped", lambda *args, **kwargs: completed(bluez_info(bmap=False))
     )
 
     with pytest.raises(BmapError, match="does not advertise Bose BMAP"):
@@ -50,8 +52,8 @@ def test_resolve_device_rejects_non_bmap_device(monkeypatch):
 
 def test_resolve_device_rejects_recognized_unsupported_product(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess,
-        "run",
+        bridge,
+        "run_capped",
         lambda *args, **kwargs: completed(bluez_info(product_id="4024")),
     )
 
@@ -76,7 +78,7 @@ def test_resolve_device_ignores_shadow_bluetoothctl_in_path(tmp_path, monkeypatc
         seen["argv0"] = args[0]
         return completed(bluez_info())
 
-    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(bridge, "run_capped", fake_run)
 
     device = bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
@@ -92,6 +94,91 @@ def test_resolve_device_fails_closed_without_system_bluetoothctl(monkeypatch):
 
     with pytest.raises(BmapError, match="bluetoothctl is required"):
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_resolve_device_fails_closed_on_gushing_bluetoothctl(tmp_path, monkeypatch):
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('A' * 300000)\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr("pybmap.discovery.BLUETOOTHCTL", str(stub))
+
+    with pytest.raises(BmapError, match="too much data"):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_panel_path_needs_no_environment(tmp_path, monkeypatch):
+    # The panel launches children with a scrubbed environment: prove the
+    # panel path functions with nothing in it at all. Note this must empty
+    # the real process environment, not just rebind os.environ -- execve
+    # with env=None inherits the C-level environ either way, which is
+    # exactly why the scrubbing has to happen panel-side. (A Python stub
+    # would self-report LC_CTYPE, and shells self-add PWD/SHLVL, so the
+    # assertion is function -- not byte-identical emptiness.)
+    for key in list(os.environ):
+        monkeypatch.delenv(key, raising=False)
+    assert bridge.bluetoothctl_path() in (None, "/usr/bin/bluetoothctl")
+
+    stub = tmp_path / "probe"
+    stub.write_text("#!%s\nprint('ok')\n" % sys.executable)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    result = bridge.run_capped([str(stub)], timeout=5)
+    assert result.returncode == 0
+    assert result.stdout == "ok\n"
+
+
+def test_hostile_loader_env_fails_closed(tmp_path, monkeypatch):
+    # LD_PRELOAD / PYTHONPATH poison hits every child at exec time; the
+    # bridge must still fail closed as BmapError, never crash or hang.
+    monkeypatch.setenv("LD_PRELOAD", "/nonexistent/evil.so")
+    monkeypatch.setenv("PYTHONPATH", "/nonexistent/evil")
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('x')\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr("pybmap.discovery.BLUETOOTHCTL", str(stub))
+
+    with pytest.raises(BmapError):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_resolve_device_truncates_hostile_error_detail(monkeypatch):
+    def hostile(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="E" * 5000)
+
+    monkeypatch.setattr(bridge, "run_capped", hostile)
+
+    with pytest.raises(BmapError) as caught:
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+    assert len(str(caught.value)) <= bridge.ERROR_DETAIL_LIMIT
+
+
+def test_emit_json_prints_small_payloads(capsys):
+    bridge.emit_json({"schemaVersion": 1})
+
+    assert json.loads(capsys.readouterr().out) == {"schemaVersion": 1}
+
+
+def test_emit_json_refuses_huge_payloads():
+    with pytest.raises(BmapError, match="exceeded"):
+        bridge.emit_json({"devices": ["D" * 100000]})
+
+
+def test_scan_fails_closed_on_huge_device_list(monkeypatch, capsys):
+    monkeypatch.setattr(
+        bridge,
+        "scan_bose_devices",
+        lambda: [
+            {"address": "AA:BB:CC:DD:EE:%02X" % i, "name": "D" * 500}
+            for i in range(500)
+        ],
+    )
+
+    assert bridge.main(["scan"]) == 1
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize(

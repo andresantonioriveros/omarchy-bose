@@ -1,3 +1,12 @@
+// Consumer-side mirror of the bridge OUTPUT_CAP_BYTES: refuse to JSON.parse
+// anything bigger, so a compromised or buggy producer can never make the
+// shell process a megabyte document. Real payloads are a few KiB.
+// Length is measured in UTF-8 bytes, not UTF-16 units: text.length
+// undercounts multibyte documents up to 3x, which would let a valid-JSON
+// CJK payload sail past a character count triple the byte cap.
+function utf8Length(text) { return unescape(encodeURIComponent(text)).length }
+var MAX_JSON_BYTES = 65536
+
 function emptyStatus() {
   return {
     reachable: false,
@@ -49,7 +58,10 @@ function percentage(value) {
 }
 
 function parseBridgeStatus(raw) {
-  var payload = JSON.parse(String(raw === undefined || raw === null ? "" : raw))
+  var text = String(raw === undefined || raw === null ? "" : raw)
+  if (utf8Length(text) > MAX_JSON_BYTES)
+    throw new Error("Bose status exceeded size limit")
+  var payload = JSON.parse(text)
   if (!payload || Number(payload.schemaVersion) !== 1)
     throw new Error("Unsupported Bose status format")
 
@@ -231,7 +243,9 @@ function isBoseDevice(device, allowed) {
 
 function parseDiscoveryAddresses(raw) {
   try {
-    var payload = JSON.parse(String(raw || ""))
+    var text = String(raw || "")
+    if (utf8Length(text) > MAX_JSON_BYTES) return []
+    var payload = JSON.parse(text)
     if (!payload || Number(payload.schemaVersion) !== 1) return []
     var devices = Array.isArray(payload.devices) ? payload.devices : []
     var addrs = []
@@ -391,6 +405,11 @@ function rowIndex(rows, key) {
   return -1
 }
 
+// UI labels never need more than this: BmapError strings can carry
+// device-influenced detail (see bridge ERROR_DETAIL_LIMIT), so bound what
+// reaches vendorError/actionStatus no matter which error raised it.
+var MAX_ERROR_CHARS = 500
+
 function errorForProcess(stderr) {
-  return cleanError(stderr)
+  return cleanError(stderr).substring(0, MAX_ERROR_CHARS)
 }

@@ -285,4 +285,37 @@ TestCase {
   function test_cleanErrorRemovesBridgePrefix() {
     compare(Model.errorForProcess("Omabose: device unavailable\n"), "device unavailable")
   }
+
+  function test_errorForProcessTruncatesHostileDetail() {
+    var hostile = "Omabose: "
+    for (var i = 0; i < 2000; i++) hostile += "E"
+    var shown = Model.errorForProcess(hostile)
+    verify(shown.length <= Model.MAX_ERROR_CHARS)
+    verify(shown.length > 0)
+  }
+
+  function test_parseBridgeStatusRejectsOversizedPayload() {
+    var big = "x"
+    while (big.length <= Model.MAX_JSON_BYTES) big += big
+    var threw = false
+    try { Model.parseBridgeStatus(big) } catch (e) { threw = true }
+    verify(threw)
+  }
+
+  function test_parseDiscoveryAddressesRejectsOversizedPayload() {
+    var big = "x"
+    while (big.length <= Model.MAX_JSON_BYTES) big += big
+    compare(Model.parseDiscoveryAddresses(big).length, 0)
+  }
+
+  function test_sizeGuardsCountBytesNotCharacters() {
+    // 40000 chars but 80000 UTF-8 bytes: a character count waves it
+    // through at nearly triple the byte cap, so it must still refuse.
+    var wide = ""
+    for (var i = 0; i < 40000; i++) wide += "é"
+    var threw = false
+    try { Model.parseBridgeStatus(wide) } catch (e) { threw = true }
+    verify(threw)
+    compare(Model.parseDiscoveryAddresses(wide).length, 0)
+  }
 }
