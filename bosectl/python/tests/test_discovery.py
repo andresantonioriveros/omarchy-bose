@@ -107,7 +107,7 @@ def test_is_audio_device():
 @requires_linux
 def test_list_bmap_devices_enriches_supported_and_unsupported(monkeypatch):
     monkeypatch.setattr(
-        discovery.subprocess, "run", fake_run_factory())
+        discovery, "run_capped", fake_run_factory())
 
     devices = discovery.list_bmap_devices()
     by_address = {device["address"]: device for device in devices}
@@ -143,8 +143,44 @@ def test_list_bmap_devices_empty_without_bluetoothctl(monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError("bluetoothctl")
 
-    monkeypatch.setattr(discovery.subprocess, "run", missing)
+    monkeypatch.setattr(discovery, "run_capped", missing)
 
+    assert discovery.list_bmap_devices() == []
+
+
+@requires_linux
+def test_list_bmap_devices_empty_on_gushing_paired_list(tmp_path, monkeypatch):
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\n" % sys.executable
+        + "import sys\n"
+        + "sys.stdout.write('Z' * 200000 + '\\nDevice %s Name\\n')\n" % QC_ULTRA2
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr(discovery, "BLUETOOTHCTL", str(stub))
+
+    # The valid MAC line sits past the cap: uncapped parsing would find it,
+    # so [] proves the byte cap fired rather than the parser missing.
+    assert discovery.list_bmap_devices() == []
+
+
+@requires_linux
+def test_list_bmap_devices_skips_gushing_device_info(tmp_path, monkeypatch):
+    valid = bose_info("4082", connected=True)
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\n" % sys.executable
+        + "import sys\n"
+        + "if sys.argv[1:2] == ['devices']:\n"
+        + "    sys.stdout.write('Device %s Name\\n')\n" % QC_ULTRA2
+        + "else:\n"
+        + "    sys.stdout.write('Z' * 200000 + '\\n' + %r + '\\n')\n" % valid
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr(discovery, "BLUETOOTHCTL", str(stub))
+
+    # The valid BMAP block sits past the cap: uncapped parsing would list
+    # the device, so [] proves the byte cap fired rather than a parse miss.
     assert discovery.list_bmap_devices() == []
 
 
@@ -160,7 +196,7 @@ def test_list_bmap_devices_skips_unreadable_device(monkeypatch):
             raise subprocess.TimeoutExpired(args, timeout=3)
         return subprocess.CompletedProcess(args, 0, stdout=INFOS[args[2]])
 
-    monkeypatch.setattr(discovery.subprocess, "run", flaky)
+    monkeypatch.setattr(discovery, "run_capped", flaky)
 
     devices = discovery.list_bmap_devices()
 
@@ -170,7 +206,7 @@ def test_list_bmap_devices_skips_unreadable_device(monkeypatch):
 @requires_linux
 def test_list_bmap_devices_preserves_paired_order(monkeypatch):
     monkeypatch.setattr(
-        discovery.subprocess, "run", fake_run_factory())
+        discovery, "run_capped", fake_run_factory())
 
     devices = discovery.list_bmap_devices()
 
@@ -187,7 +223,7 @@ def test_list_bmap_devices_is_public_api():
 @requires_linux
 def test_find_bmap_device_prefers_connected(monkeypatch):
     monkeypatch.setattr(
-        discovery.subprocess, "run", fake_run_factory())
+        discovery, "run_capped", fake_run_factory())
 
     mac, device_type = discovery.find_bmap_device()
 
