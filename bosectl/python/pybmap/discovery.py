@@ -7,6 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from .catalog import BMAP_UUID, lookup_device
+from .subproc import run_capped
 
 # Only a literal MAC is handed on to bluetoothctl, mirroring the C++ guard.
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
@@ -126,10 +127,10 @@ else:
         if exe is None:
             return []
         try:
-            result = subprocess.run(
-                [exe, "devices", "Paired"],
-                capture_output=True, text=True, timeout=5,
-            )
+            # Bounded like bridge resolve_device: paired-device aliases are
+            # device-controlled, and OutputTooLarge is already covered by the
+            # SubprocessError catch below.
+            result = run_capped([exe, "devices", "Paired"], timeout=5)
         except (OSError, subprocess.SubprocessError):
             return []
         macs = []
@@ -149,13 +150,10 @@ else:
         if exe is None:
             return None
         try:
-            info = subprocess.run(
-                [exe, "info", mac],
-                capture_output=True, text=True, timeout=3,
-            )
+            result = run_capped([exe, "info", mac], timeout=3)
         except (OSError, subprocess.SubprocessError):
             return None
-        return info.stdout
+        return result.stdout
 
 
     def _iter_bmap_infos():

@@ -21,6 +21,7 @@ from pybmap.discovery import (
     list_bmap_devices,
 )
 from pybmap.errors import BmapConnectionError, BmapError
+from pybmap.subproc import OutputTooLarge, run_capped
 
 
 SCHEMA_VERSION = 1
@@ -47,16 +48,15 @@ def resolve_device(mac):
         raise BmapError("bluetoothctl is required")
 
     try:
-        result = subprocess.run(
-            [exe, "info", mac],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        # Bounded: `info` echoes device-set fields, so the child must not be
+        # able to grow our buffers without limit (see pybmap.subproc).
+        result = run_capped([exe, "info", mac], timeout=5)
     except FileNotFoundError as error:
         raise BmapError("bluetoothctl is required") from error
     except subprocess.TimeoutExpired as error:
         raise BmapError("Timed out reading the Bluetooth device") from error
+    except OutputTooLarge as error:
+        raise BmapError("Bluetooth device returned too much data") from error
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
