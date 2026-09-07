@@ -366,4 +366,21 @@ TestCase {
     compare(capture.stdout, "out")
     compare(capture.stderr, "err")
   }
+
+  function test_selectionSaveRetriesAddressChangedInFlight() {
+    var result = Model.selectionSaveCompleted(
+      "AA:BB:CC:DD:EE:02", "", "AA:BB:CC:DD:EE:01", 0, true)
+    compare(result.persistedAddress, "AA:BB:CC:DD:EE:01")
+    compare(result.attempts, 0)
+    verify(result.retry)
+  }
+
+  function test_selectionSavePreservesDirtyStateOnFailure() {
+    var result = Model.selectionSaveCompleted(
+      "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:01",
+      "AA:BB:CC:DD:EE:02", 1, false)
+    compare(result.persistedAddress, "AA:BB:CC:DD:EE:01")
+    compare(result.attempts, 2)
+    verify(result.retry)
+  }
 }

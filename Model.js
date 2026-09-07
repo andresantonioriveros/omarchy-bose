@@ -48,6 +48,16 @@ function appendProcessOutput(capture, value, isStderr) {
   }
 }
 
+function selectionSaveCompleted(preferred, persisted, submitted, attempts, success) {
+  var saved = success ? submitted : persisted
+  var failures = success ? 0 : attempts + 1
+  return {
+    persistedAddress: saved,
+    attempts: failures,
+    retry: preferred !== saved && failures < 4
+  }
+}
+
 function emptyStatus() {
   return {
     reachable: false,
