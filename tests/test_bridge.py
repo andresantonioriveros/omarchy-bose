@@ -108,6 +108,69 @@ def test_resolve_device_fails_closed_on_gushing_bluetoothctl(tmp_path, monkeypat
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
 
+def test_resolve_device_truncates_hostile_error_detail(monkeypatch):
+    def hostile(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="E" * 5000)
+
+    monkeypatch.setattr(bridge, "run_capped", hostile)
+
+    with pytest.raises(BmapError) as caught:
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+    assert len(str(caught.value)) <= bridge.ERROR_DETAIL_LIMIT
+
+
+def test_emit_json_prints_small_payloads(capsys):
+    bridge.emit_json({"schemaVersion": 1})
+
+    assert json.loads(capsys.readouterr().out) == {"schemaVersion": 1}
+
+
+def test_emit_json_refuses_huge_payloads():
+    with pytest.raises(BmapError, match="exceeded"):
+        bridge.emit_json({"devices": ["D" * 100000]})
+
+
+def test_emit_json_cap_includes_trailing_newline(monkeypatch, capsys):
+    payload = {"schemaVersion": 1, "padding": "x"}
+    wire = json.dumps(payload, separators=(",", ":")) + "\n"
+    monkeypatch.setattr(bridge, "OUTPUT_CAP_BYTES", len(wire.encode("utf-8")))
+
+    bridge.emit_json(payload)
+    assert capsys.readouterr().out == wire
+
+    monkeypatch.setattr(bridge, "OUTPUT_CAP_BYTES", len(wire.encode("utf-8")) - 1)
+    with pytest.raises(BmapError, match="exceeded"):
+        bridge.emit_json(payload)
+
+
+def test_main_caps_all_error_output(monkeypatch, capsys):
+    monkeypatch.setattr(
+        bridge,
+        "scan_bose_devices",
+        lambda: (_ for _ in ()).throw(BmapError("😀" * 10000)),
+    )
+
+    assert bridge.main(["scan"]) == 1
+    error = capsys.readouterr().err
+    assert len(error.encode("utf-8")) <= bridge.ERROR_OUTPUT_CAP_BYTES
+    assert error.endswith("\n")
+
+
+def test_scan_fails_closed_on_huge_device_list(monkeypatch, capsys):
+    monkeypatch.setattr(
+        bridge,
+        "scan_bose_devices",
+        lambda: [
+            {"address": "AA:BB:CC:DD:EE:%02X" % i, "name": "D" * 500}
+            for i in range(500)
+        ],
+    )
+
+    assert bridge.main(["scan"]) == 1
+    assert capsys.readouterr().out == ""
+
+
 @pytest.mark.parametrize(
     "message",
     [
