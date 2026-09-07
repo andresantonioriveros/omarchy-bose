@@ -79,7 +79,7 @@ Item {
     }
     discoveryQueued = false
     discoveryCapture = Model.emptyProcessOutput()
-    discoveryProcess.command = ["/usr/bin/python3", bridgePath, "scan"]
+    discoveryProcess.command = ["/usr/bin/python3", "-I", bridgePath, "scan"]
     discoveryProcess.running = true
   }
 
@@ -148,7 +148,7 @@ Item {
 
   function command(args) {
     if (!selectedDevice || !selectedDevice.connected) return []
-    return ["/usr/bin/python3", bridgePath, "--mac", selectedDevice.address].concat(args)
+    return ["/usr/bin/python3", "-I", bridgePath, "--mac", selectedDevice.address].concat(args)
   }
 
   function clearPending() {
@@ -387,11 +387,15 @@ Item {
     onLoadFailed: root.loadSelection("")
   }
 
-  // SplitParser with an empty marker emits chunks without retaining them.
-  // Model.appendProcessOutput keeps at most MAX_JSON_BYTES across both
-  // streams and the process is stopped as soon as that combined cap trips.
+  // Child processes start in Python isolated mode with a scrubbed environment,
+  // so ambient variables and user-site startup hooks cannot reach the bridge
+  // or bluetoothctl. BlueZ output is decoded as explicit UTF-8.
+  // SplitParser emits chunks without retaining them; Model.appendProcessOutput
+  // keeps at most MAX_JSON_BYTES across both streams.
   Process {
     id: discoveryProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: SplitParser {
       splitMarker: ""
@@ -424,6 +428,8 @@ Item {
 
   Process {
     id: statusProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: SplitParser {
       splitMarker: ""
@@ -499,6 +505,8 @@ Item {
 
   Process {
     id: actionProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
     stdout: SplitParser {
       splitMarker: ""
