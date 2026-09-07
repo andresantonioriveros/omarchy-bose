@@ -21,7 +21,11 @@ from pybmap.discovery import (
     list_bmap_devices,
 )
 from pybmap.errors import BmapConnectionError, BmapError
-from pybmap.subproc import OutputTooLarge, run_capped
+from pybmap.subproc import (
+    OutputTooLarge,
+    install_terminate_forwarding,
+    run_capped,
+)
 
 
 SCHEMA_VERSION = 1
@@ -372,4 +376,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # The shell stops us with SIGTERM; forward it to every active
+    # bluetoothctl process group instead of orphaning concurrent scans.
+    install_terminate_forwarding()
     raise SystemExit(main())

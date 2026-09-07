@@ -1,15 +1,18 @@
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import bridge
+from pybmap import subproc
 from pybmap.catalog import BMAP_UUID
 from pybmap.errors import BmapConnectionError, BmapError
 from pybmap.types import BatteryReading, BatteryStatus, EqBand
@@ -143,6 +146,195 @@ def test_hostile_loader_env_fails_closed(tmp_path, monkeypatch):
 
     with pytest.raises(BmapError):
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def _wait_for_pid_files(paths, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if all(path.exists() for path in paths):
+            return [int(path.read_text()) for path in paths]
+        time.sleep(0.02)
+    raise AssertionError("child pid files were not created")
+
+
+def _pid_is_running(pid):
+    try:
+        state = Path("/proc/%d/stat" % pid).read_text().split()[2]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+def _wait_for_pids_to_stop(pids, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(_pid_is_running(pid) for pid in pids):
+            return
+        time.sleep(0.02)
+    raise AssertionError("child processes still running: %r" % pids)
+
+
+def _cleanup_processes(proc, pids):
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    for pid in pids:
+        if _pid_is_running(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _sleep_probe(tmp_path):
+    probe = tmp_path / "sleep_probe.py"
+    probe.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    return probe
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process lifecycle")
+def test_sigterm_forwards_to_all_concurrent_children(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    probe = _sleep_probe(tmp_path)
+    pid_files = [tmp_path / ("child-%d.pid" % index) for index in range(3)]
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import concurrent.futures, sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "def run(path):\n"
+        + "    subproc.run_capped([sys.executable, %r, path], timeout=60)\n"
+        % str(probe)
+        + "with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:\n"
+        + "    list(pool.map(run, sys.argv[1:]))\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), *map(str, pid_files)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    pids = []
+    try:
+        pids = _wait_for_pid_files(pid_files)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-death signal")
+def test_child_dies_when_bridge_is_sigkilled(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    probe = _sleep_probe(tmp_path)
+    pid_file = tmp_path / "child.pid"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.run_capped([sys.executable, %r, %r], timeout=60)\n"
+        % (str(probe), str(pid_file))
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    pids = []
+    try:
+        pids = _wait_for_pid_files([pid_file])
+        proc.kill()
+        assert proc.wait(timeout=10) == -signal.SIGKILL
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX process groups")
+def test_sigterm_kills_descendants_in_child_process_group(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    direct_pid = tmp_path / "direct.pid"
+    nested_pid = tmp_path / "nested.pid"
+    probe = tmp_path / "tree_probe.py"
+    probe.write_text(
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import os,sys,time; from pathlib import Path; "
+        "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)', "
+        "sys.argv[2]])\n"
+        "time.sleep(60)\n"
+    )
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "subproc.run_capped([sys.executable, %r, %r, %r], timeout=60)\n"
+        % (str(probe), str(direct_pid), str(nested_pid))
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    pids = []
+    try:
+        pids = _wait_for_pid_files([direct_pid, nested_pid])
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-death signal")
+def test_spawn_registration_window_cannot_orphan_child(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    probe = _sleep_probe(tmp_path)
+    pid_file = tmp_path / "child.pid"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys, time\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "real_popen = subproc.subprocess.Popen\n"
+        + "def delayed_popen(*args, **kwargs):\n"
+        + "    child = real_popen(*args, **kwargs)\n"
+        + "    time.sleep(60)\n"
+        + "    return child\n"
+        + "subproc.subprocess.Popen = delayed_popen\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "subproc.run_capped([sys.executable, %r, %r], timeout=60)\n"
+        % (str(probe), str(pid_file))
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    pids = []
+    try:
+        pids = _wait_for_pid_files([pid_file])
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+def test_active_children_cleared_after_run():
+    subproc.run_capped(
+        [sys.executable, "-c", "print('hi')"], timeout=10
+    )
+    assert subproc._active_children == set()
+
+
+def test_main_does_not_replace_callers_sigterm_handler(monkeypatch, capsys):
+    previous = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(bridge, "scan_bose_devices", lambda: [])
+
+    assert bridge.main(["scan"]) == 0
+    capsys.readouterr()
+
+    assert signal.getsignal(signal.SIGTERM) is previous
 
 
 @pytest.mark.skipif(shutil.which("qs") is None, reason="requires Quickshell")

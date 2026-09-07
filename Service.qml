@@ -551,4 +551,13 @@ Item {
     reconcileDevices()
     refreshDiscovery()
   }
+
+  Component.onDestruction: {
+    // Request SIGTERM before teardown. The bridge kills every active child
+    // process group, while its Linux parent-death contract also covers the
+    // immediate SIGKILL Quickshell may issue as the Process is destroyed.
+    if (discoveryProcess.running) discoveryProcess.running = false
+    if (statusProcess.running) statusProcess.running = false
+    if (actionProcess.running) actionProcess.running = false
+  }
 }
