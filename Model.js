@@ -1,3 +1,53 @@
+// Consumer-side mirror of the bridge OUTPUT_CAP_BYTES: refuse to JSON.parse
+// anything bigger, so the shell never retains or parses an oversized
+// document. Real payloads are a few KiB.
+// Length is measured in UTF-8 bytes, not UTF-16 units. The optional limit
+// avoids scanning the remainder once a streaming collector is already over.
+function utf8Length(text, limit) {
+  var value = String(text || "")
+  var length = 0
+  for (var i = 0; i < value.length; i++) {
+    var unit = value.charCodeAt(i)
+    if (unit <= 0x7f) length += 1
+    else if (unit <= 0x7ff) length += 2
+    else if (unit >= 0xd800 && unit <= 0xdbff
+        && i + 1 < value.length
+        && value.charCodeAt(i + 1) >= 0xdc00
+        && value.charCodeAt(i + 1) <= 0xdfff) {
+      length += 4
+      i++
+    } else length += 3
+    if (limit !== undefined && length > limit) return length
+  }
+  return length
+}
+var MAX_JSON_BYTES = 65536
+
+function emptyProcessOutput() {
+  return { stdout: "", stderr: "", bytes: 0, exceeded: false }
+}
+
+function appendProcessOutput(capture, value, isStderr) {
+  if (capture.exceeded) return capture
+  var text = String(value || "")
+  var remaining = MAX_JSON_BYTES - capture.bytes
+  var added = utf8Length(text, remaining)
+  if (added > remaining) {
+    return {
+      stdout: capture.stdout,
+      stderr: capture.stderr,
+      bytes: capture.bytes,
+      exceeded: true
+    }
+  }
+  return {
+    stdout: isStderr ? capture.stdout : capture.stdout + text,
+    stderr: isStderr ? capture.stderr + text : capture.stderr,
+    bytes: capture.bytes + added,
+    exceeded: false
+  }
+}
+
 function emptyStatus() {
   return {
     reachable: false,
@@ -49,7 +99,10 @@ function percentage(value) {
 }
 
 function parseBridgeStatus(raw) {
-  var payload = JSON.parse(String(raw === undefined || raw === null ? "" : raw))
+  var text = String(raw === undefined || raw === null ? "" : raw)
+  if (utf8Length(text, MAX_JSON_BYTES) > MAX_JSON_BYTES)
+    throw new Error("Bose status exceeded size limit")
+  var payload = JSON.parse(text)
   if (!payload || Number(payload.schemaVersion) !== 1)
     throw new Error("Unsupported Bose status format")
 
@@ -231,8 +284,10 @@ function isBoseDevice(device, allowed) {
 
 function parseDiscoveryAddresses(raw) {
   try {
-    var payload = JSON.parse(String(raw || ""))
-    if (!payload || Number(payload.schemaVersion) !== 1) return []
+    var text = String(raw || "")
+    if (utf8Length(text, MAX_JSON_BYTES) > MAX_JSON_BYTES) return null
+    var payload = JSON.parse(text)
+    if (!payload || Number(payload.schemaVersion) !== 1) return null
     var devices = Array.isArray(payload.devices) ? payload.devices : []
     var addrs = []
     for (var i = 0; i < devices.length; i++) {
@@ -241,7 +296,7 @@ function parseDiscoveryAddresses(raw) {
     }
     return addrs.sort()
   } catch (e) {
-    return []
+    return null
   }
 }
 
@@ -391,6 +446,18 @@ function rowIndex(rows, key) {
   return -1
 }
 
+// UI labels never need more than this: BmapError strings can carry
+// device-influenced detail (see bridge ERROR_DETAIL_LIMIT), so bound what
+// reaches vendorError/actionStatus no matter which error raised it.
+var MAX_ERROR_CHARS = 500
+
 function errorForProcess(stderr) {
-  return cleanError(stderr)
+  var text = cleanError(stderr)
+  if (text.length <= MAX_ERROR_CHARS) return text
+  var end = MAX_ERROR_CHARS
+  var last = text.charCodeAt(end - 1)
+  var next = text.charCodeAt(end)
+  if (last >= 0xd800 && last <= 0xdbff
+      && next >= 0xdc00 && next <= 0xdfff) end--
+  return text.substring(0, end)
 }

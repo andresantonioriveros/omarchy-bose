@@ -25,6 +25,17 @@ from pybmap.subproc import OutputTooLarge, run_capped
 
 
 SCHEMA_VERSION = 1
+# Producer-side cap for everything this bridge prints: the panel buffers
+# child output to end-of-stream, so the bridge itself must guarantee small
+# output rather than trusting it. Real payloads are a few KiB; anything past
+# the cap fails closed instead of reaching the panel's JSON parser.
+OUTPUT_CAP_BYTES = 65536
+# Errors are rendered as short UI labels. Bound the wire form separately so
+# every exception path is safe for the panel's streaming collector.
+ERROR_OUTPUT_CAP_BYTES = 2048
+# bluetoothctl stderr on failure is device-influenced free text echoed into
+# our one-line errors: keep the gist, drop the rest.
+ERROR_DETAIL_LIMIT = 500
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 CONNECTION_RETRY_DELAYS = (0.5, 1.0, 1.5)
 EQ_BANDS = (
@@ -60,7 +71,7 @@ def resolve_device(mac):
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        raise BmapError(detail or "Bluetooth device was not found")
+        raise BmapError((detail[:ERROR_DETAIL_LIMIT] or "Bluetooth device was not found"))
 
     info = result.stdout
     if not has_bmap(info):
@@ -81,6 +92,32 @@ def safe_read(operation, fallback):
         return operation()
     except BmapError:
         return fallback
+
+
+def emit_json(payload):
+    """Print one JSON document, refusing to emit past the output cap.
+
+    Raises BmapError instead, which main turns into a one-line stderr error
+    and a nonzero exit -- the panel then keeps its previous state rather
+    than parsing an unbounded document.
+    """
+    text = json.dumps(payload, separators=(",", ":")) + "\n"
+    if len(text.encode("utf-8")) > OUTPUT_CAP_BYTES:
+        raise BmapError(
+            "Bridge output exceeded %d bytes" % OUTPUT_CAP_BYTES
+        )
+    sys.stdout.write(text)
+
+
+def emit_error(error):
+    """Write one UTF-8 error line without exceeding the stderr cap."""
+    prefix = "Omabose: "
+    suffix = "\n"
+    available = ERROR_OUTPUT_CAP_BYTES - len((prefix + suffix).encode("utf-8"))
+    detail = str(error).encode("utf-8", "replace")[:available].decode(
+        "utf-8", "ignore"
+    )
+    sys.stderr.write(prefix + detail + suffix)
 
 
 def connect_device(mac, device_type):
@@ -314,17 +351,14 @@ def main(argv=None):
     try:
         if args.command in ("scan", "list"):
             devices = scan_bose_devices()
-            print(json.dumps(
-                {"schemaVersion": SCHEMA_VERSION, "devices": devices},
-                separators=(",", ":"),
-            ))
+            emit_json({"schemaVersion": SCHEMA_VERSION, "devices": devices})
             return 0
         if not args.mac or not MAC_RE.fullmatch(args.mac):
             raise BmapError("Invalid Bluetooth address")
         identity = resolve_device(args.mac)
         with connect_device(args.mac, identity.config) as device:
             if args.command == "status":
-                print(json.dumps(panel_status(device, identity, args.mac), separators=(",", ":")))
+                emit_json(panel_status(device, identity, args.mac))
             elif args.command == "mode":
                 set_mode(device, args.name)
             elif args.command == "cnc":
@@ -332,7 +366,7 @@ def main(argv=None):
             elif args.command == "eq":
                 set_equalizer(device, args.bass, args.mid, args.treble)
     except (BmapError, OSError, ValueError, TypeError) as error:
-        print("Omabose: %s" % error, file=sys.stderr)
+        emit_error(error)
         return 1
     return 0
 
