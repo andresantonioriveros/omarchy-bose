@@ -856,3 +856,278 @@ def test_scan_commands_emit_versioned_device_list(monkeypatch, capsys, command):
             }
         ],
     }
+
+
+def _selection_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _selection_path(home):
+    return home / ".local" / "state" / "omarchy" / "omabose.json"
+
+
+def test_selection_load_missing_is_empty(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_roundtrip_creates_parents_and_locks_mode(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+
+    bridge.selection_save("aa:bb:cc:dd:ee:ff")
+    path = _selection_path(home)
+    assert path.read_text() == '{\n  "selectedAddress": "AA:BB:CC:DD:EE:FF"\n}\n'
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:FF"}
+
+    bridge.selection_save("")
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_oversized(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).write_text('{"selectedAddress": "' + "A" * 5000 + '"}')
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_symlink(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    target = tmp_path / "target.json"
+    target.write_text('{"selectedAddress": "AA:BB:CC:DD:EE:01"}')
+    _selection_path(home).symlink_to(target)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    assert json.loads(target.read_text())["selectedAddress"] == "AA:BB:CC:DD:EE:01"
+
+
+def test_selection_load_rejects_nonregular_and_unparsable(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).mkdir()
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).rmdir()
+    _selection_path(home).write_text("not json{")
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).write_text('{"selectedAddress": "bogus"}')
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).write_text('{"other": 1}')
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+@pytest.mark.parametrize("payload", ["[1]", '"text"', "true", "42"])
+def test_selection_load_rejects_nonobject_json(tmp_path, monkeypatch, payload):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).write_text(payload)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_fifo_without_blocking(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    os.mkfifo(_selection_path(home))
+
+    start = time.monotonic()
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    assert time.monotonic() - start < 1
+
+
+def test_selection_load_rejects_foreign_owner(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:01"}
+
+    real_uid = os.getuid()
+    monkeypatch.setattr(bridge.os, "getuid", lambda: real_uid + 1)
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_group_or_world_writable_state(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    _selection_path(home).chmod(0o666)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_rejects_symlinked_parent_directory(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    redirected = tmp_path / "redirected"
+    victim = redirected / "state" / "omarchy" / "omabose.json"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("precious")
+    (home / ".local").symlink_to(redirected, target_is_directory=True)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    with pytest.raises(OSError):
+        bridge.selection_save("AA:BB:CC:DD:EE:01")
+    assert victim.read_text() == "precious"
+
+
+def test_selection_rejects_insecure_parent_permissions(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    _selection_path(home).parent.chmod(0o777)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    with pytest.raises(PermissionError):
+        bridge.selection_save("AA:BB:CC:DD:EE:02")
+
+
+def test_selection_save_rejects_bad_mac(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+
+    with pytest.raises(BmapError, match="Invalid Bluetooth address"):
+        bridge.selection_save("not-a-mac")
+    assert not _selection_path(home).exists()
+
+
+def test_selection_save_replaces_symlink_without_following(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    target = tmp_path / "victim.json"
+    target.write_text("precious")
+    _selection_path(home).symlink_to(target)
+
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+
+    assert target.read_text() == "precious"
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:01"}
+
+
+def test_selection_save_fsyncs_containing_directory(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    synced_types = []
+    real_fsync = os.fsync
+
+    def track_fsync(fd):
+        synced_types.append(stat.S_IFMT(os.fstat(fd).st_mode))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(bridge.os, "fsync", track_fsync)
+    bridge.selection_save("AA:BB:CC:DD:EE:02")
+
+    assert stat.S_IFREG in synced_types
+    assert stat.S_IFDIR in synced_types
+
+
+def test_selection_commands_end_to_end(tmp_path, monkeypatch, capsys):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.main(["selection-load"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"selectedAddress": ""}
+    assert bridge.main(["selection-save", "--mac", "AA:BB:CC:DD:EE:01"]) == 0
+    assert bridge.main(["selection-save", "--mac", "nope"]) == 1
+    assert bridge.main(["selection-load"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "selectedAddress": "AA:BB:CC:DD:EE:01"
+    }
+
+
+def test_selection_save_accepts_top_level_mac_option(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.main([
+        "--mac", "AA:BB:CC:DD:EE:02", "selection-save"
+    ]) == 0
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:02"}
+
+
+def test_isolated_selection_command_uses_allowlisted_home(tmp_path):
+    home = tmp_path / "custom-home"
+    home.mkdir()
+
+    result = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            str(Path(bridge.__file__)),
+            "selection-save",
+            "--mac",
+            "AA:BB:CC:DD:EE:03",
+        ],
+        env={"HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(_selection_path(home).read_text()) == {
+        "selectedAddress": "AA:BB:CC:DD:EE:03"
+    }
+
+
+@pytest.mark.skipif(shutil.which("qs") is None, reason="requires Quickshell")
+def test_service_loads_selection_from_allowlisted_home(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:03")
+    fixture = Path(__file__).with_name("service_selection.qml")
+    config = tmp_path / "quickshell-config"
+    config.mkdir()
+    shutil.copy(fixture, config / "shell.qml")
+    shutil.copy(Path(bridge.__file__).with_name("Service.qml"), config)
+    shutil.copy(Path(bridge.__file__).with_name("Model.js"), config)
+    (config / "bridge.py").symlink_to(Path(bridge.__file__))
+    environment = os.environ.copy()
+    environment["HOME"] = str(home)
+
+    result = subprocess.run(
+        ["qs", "--no-color", "--path", str(config)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert "RESULT selection AA:BB:CC:DD:EE:03" in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_selection_save_sigterm_removes_temporary_file(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    ready = tmp_path / "ready"
+    driver = tmp_path / "selection_driver.py"
+    driver.write_text(
+        "import os, signal, stat, sys, time\n"
+        "from pathlib import Path\n"
+        "os.environ['HOME'] = %r\n" % str(home)
+        + "sys.path.insert(0, %r)\n" % str(Path(bridge.__file__).parent)
+        + "import bridge\n"
+        + "real_fsync = bridge.os.fsync\n"
+        + "def slow_fsync(fd):\n"
+        + "    if stat.S_ISREG(os.fstat(fd).st_mode):\n"
+        + "        Path(%r).write_text('ready')\n" % str(ready)
+        + "        time.sleep(60)\n"
+        + "    return real_fsync(fd)\n"
+        + "bridge.os.fsync = slow_fsync\n"
+        + "raise SystemExit(bridge.main([\n"
+        + "    'selection-save', '--mac', 'AA:BB:CC:DD:EE:04'\n"
+        + "], install_signal_handlers=True))\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        assert ready.exists(), "selection save never reached fsync"
+
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        state_dir = _selection_path(home).parent
+        assert list(state_dir.glob(".omabose-*.tmp")) == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

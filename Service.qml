@@ -29,12 +29,17 @@ Item {
   property string actionStatus: ""
   property var statusCapture: Model.emptyProcessOutput()
   property var actionCapture: Model.emptyProcessOutput()
+  property var selectionLoadCapture: Model.emptyProcessOutput()
   property bool statusTimedOut: false
   property bool actionTimedOut: false
+  property bool selectionLoadTimedOut: false
+  property bool selectionSaveTimedOut: false
 
-  readonly property string selectionPath: Quickshell.env("HOME") + "/.local/state/omarchy/omabose.json"
   property bool selectionLoaded: false
   property string preferredAddress: ""
+  property string selectionPersistedAddress: ""
+  property string selectionSavingAddress: ""
+  property int selectionSaveAttempts: 0
 
   readonly property var connectedDevices: boseDevices.filter(function(device) { return device.connected })
   readonly property var selectedDevice: Model.deviceForAddress(boseDevices, selectedAddress)
@@ -66,6 +71,7 @@ Item {
   readonly property bool eqAvailable: vendorMatchesSelection && vendorStatus.eqAvailable
   readonly property string bridgePath: decodeURIComponent(
     Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//, ""))
+  readonly property string stateHome: Quickshell.env("HOME")
   readonly property int pollIntervalMs: {
     var seconds = Number(setting("pollIntervalSec", 15))
     if (!isFinite(seconds)) seconds = 15
@@ -111,14 +117,30 @@ Item {
     if (selectionLoaded) return
     var addr = parsePersistedAddress(raw)
     preferredAddress = addr
+    selectionPersistedAddress = addr
     selectionLoaded = true
     reconcileDevices()
   }
 
+  function runSelectionLoad() {
+    if (selectionLoadProcess.running) return
+    selectionLoadCapture = Model.emptyProcessOutput()
+    selectionLoadTimedOut = false
+    selectionLoadProcess.command = [
+      "/usr/bin/python3", "-I", bridgePath, "selection-load"
+    ]
+    selectionLoadProcess.running = true
+  }
+
   function flushSelection() {
-    if (!selectionLoaded) return
-    var payload = preferredAddress ? { selectedAddress: preferredAddress.toUpperCase() } : {}
-    selectionFile.setText(JSON.stringify(payload, null, 2) + "\n")
+    if (!selectionLoaded || selectionSaveProcess.running
+        || preferredAddress === selectionPersistedAddress) return
+    var args = ["selection-save"]
+    if (preferredAddress) args.push("--mac", preferredAddress.toUpperCase())
+    selectionSavingAddress = preferredAddress
+    selectionSaveTimedOut = false
+    selectionSaveProcess.command = ["/usr/bin/python3", "-I", bridgePath].concat(args)
+    selectionSaveProcess.running = true
   }
 
   function reconcileDevices() {
@@ -141,6 +163,7 @@ Item {
   function select(address) {
     var selected = findDevice(address)
     if (!selected) return
+    if (preferredAddress !== selected.address) selectionSaveAttempts = 0
     preferredAddress = selected.address
     if (selectionLoaded) selectionSaveTimer.restart()
     if (selected.address !== selectedAddress) selectedAddress = selected.address
@@ -345,9 +368,31 @@ Item {
 
   Timer {
     id: selectionSaveTimer
-    interval: 250
+    interval: root.selectionSaveAttempts === 0
+      ? 250 : Math.min(4000, 500 * Math.pow(2, root.selectionSaveAttempts - 1))
     repeat: false
     onTriggered: root.flushSelection()
+  }
+
+  Timer {
+    interval: 5000
+    repeat: false
+    running: selectionLoadProcess.running
+    onTriggered: {
+      root.selectionLoadTimedOut = true
+      selectionLoadProcess.running = false
+      root.loadSelection("")
+    }
+  }
+
+  Timer {
+    interval: 5000
+    repeat: false
+    running: selectionSaveProcess.running
+    onTriggered: {
+      root.selectionSaveTimedOut = true
+      selectionSaveProcess.running = false
+    }
   }
 
   Timer {
@@ -377,14 +422,49 @@ Item {
     onTriggered: discoveryProcess.running = false
   }
 
-  FileView {
-    id: selectionFile
-    path: root.selectionPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.loadSelection(text())
-    onLoadFailed: root.loadSelection("")
+  // Selection persistence lives in the bridge, where the path itself can
+  // be validated (regular file, owned by us, no symlinks, size-capped)
+  // instead of trusting FileView blindly. Load always succeeds with a
+  // (possibly empty) document; save fails loudly on invalid input.
+  Process {
+    id: selectionLoadProcess
+    clearEnvironment: true
+    environment: ({ HOME: root.stateHome })
+    command: []
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.selectionLoadCapture = root.captureOutput(
+          root.selectionLoadCapture, selectionLoadProcess, value, false)
+      }
+    }
+    onExited: function(exitCode) {
+      root.loadSelection(
+        exitCode === 0
+          && !root.selectionLoadTimedOut
+          && !root.selectionLoadCapture.exceeded
+        ? root.selectionLoadCapture.stdout : "")
+    }
+  }
+
+  Process {
+    id: selectionSaveProcess
+    clearEnvironment: true
+    environment: ({ HOME: root.stateHome })
+    command: []
+    onExited: function(exitCode) {
+      var submitted = root.selectionSavingAddress
+      var result = Model.selectionSaveCompleted(
+        root.preferredAddress,
+        root.selectionPersistedAddress,
+        submitted,
+        root.selectionSaveAttempts,
+        exitCode === 0 && !root.selectionSaveTimedOut)
+      root.selectionSavingAddress = ""
+      root.selectionPersistedAddress = result.persistedAddress
+      root.selectionSaveAttempts = result.attempts
+      if (result.retry) selectionSaveTimer.restart()
+    }
   }
 
   // Child processes start in Python isolated mode with a scrubbed environment,
@@ -547,7 +627,7 @@ Item {
   }
 
   Component.onCompleted: {
-    selectionFile.reload()
+    runSelectionLoad()
     reconcileDevices()
     refreshDiscovery()
   }
@@ -559,5 +639,7 @@ Item {
     if (discoveryProcess.running) discoveryProcess.running = false
     if (statusProcess.running) statusProcess.running = false
     if (actionProcess.running) actionProcess.running = false
+    if (selectionLoadProcess.running) selectionLoadProcess.running = false
+    if (selectionSaveProcess.running) selectionSaveProcess.running = false
   }
 }
