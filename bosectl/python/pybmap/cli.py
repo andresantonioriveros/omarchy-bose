@@ -1,13 +1,13 @@
 """bosectl CLI — thin wrapper around the pybmap library."""
 
 import os
-import subprocess
 import sys
 
 import pybmap
 from pybmap.constants import SPATIAL_NAMES, SIDETONE_NAMES, VOICE_LANGUAGES
 from pybmap.errors import BmapError, BmapConnectionError
 from pybmap.protocol import fmt_response
+from pybmap.subproc import run_capped
 
 # ── ANSI Colors ──────────────────────────────────────────────────────────────
 
@@ -35,10 +35,7 @@ _BANNER_LINES = [
 ]
 def _git_hash():
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=2,
-        )
+        result = run_capped(["git", "rev-parse", "--short", "HEAD"], timeout=2)
         return result.stdout.strip() or "unknown"
     except Exception:
         return "unknown"

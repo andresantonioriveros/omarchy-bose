@@ -1,12 +1,18 @@
 import json
 import os
 import shutil
+import signal
+import stat
 import subprocess
+import sys
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import bridge
+from pybmap import subproc
 from pybmap.catalog import BMAP_UUID
 from pybmap.errors import BmapConnectionError, BmapError
 from pybmap.types import BatteryReading, BatteryStatus, EqBand
@@ -25,7 +31,7 @@ def completed(stdout="", stderr="", returncode=0):
 
 def test_resolve_device_uses_bluez_product_id(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess, "run", lambda *args, **kwargs: completed(bluez_info())
+        bridge, "run_capped", lambda *args, **kwargs: completed(bluez_info())
     )
 
     device = bridge.resolve_device("E4:58:BC:D4:97:95")
@@ -41,7 +47,7 @@ def test_resolve_device_rejects_invalid_mac(mac):
 
 def test_resolve_device_rejects_non_bmap_device(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess, "run", lambda *args, **kwargs: completed(bluez_info(bmap=False))
+        bridge, "run_capped", lambda *args, **kwargs: completed(bluez_info(bmap=False))
     )
 
     with pytest.raises(BmapError, match="does not advertise Bose BMAP"):
@@ -50,8 +56,8 @@ def test_resolve_device_rejects_non_bmap_device(monkeypatch):
 
 def test_resolve_device_rejects_recognized_unsupported_product(monkeypatch):
     monkeypatch.setattr(
-        bridge.subprocess,
-        "run",
+        bridge,
+        "run_capped",
         lambda *args, **kwargs: completed(bluez_info(product_id="4024")),
     )
 
@@ -76,7 +82,7 @@ def test_resolve_device_ignores_shadow_bluetoothctl_in_path(tmp_path, monkeypatc
         seen["argv0"] = args[0]
         return completed(bluez_info())
 
-    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(bridge, "run_capped", fake_run)
 
     device = bridge.resolve_device("AA:BB:CC:DD:EE:FF")
 
@@ -92,6 +98,321 @@ def test_resolve_device_fails_closed_without_system_bluetoothctl(monkeypatch):
 
     with pytest.raises(BmapError, match="bluetoothctl is required"):
         bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_resolve_device_fails_closed_on_gushing_bluetoothctl(tmp_path, monkeypatch):
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('A' * 300000)\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr("pybmap.discovery.BLUETOOTHCTL", str(stub))
+
+    with pytest.raises(BmapError, match="too much data"):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def test_panel_path_needs_no_environment(tmp_path, monkeypatch):
+    # The panel launches children with a scrubbed environment: prove the
+    # panel path functions with nothing in it at all. Note this must empty
+    # the real process environment, not just rebind os.environ -- execve
+    # with env=None inherits the C-level environ either way, which is
+    # exactly why the scrubbing has to happen panel-side. (A Python stub
+    # would self-report LC_CTYPE, and shells self-add PWD/SHLVL, so the
+    # assertion is function -- not byte-identical emptiness.)
+    for key in list(os.environ):
+        monkeypatch.delenv(key, raising=False)
+    assert bridge.bluetoothctl_path() in (None, "/usr/bin/bluetoothctl")
+
+    stub = tmp_path / "probe"
+    stub.write_text("#!%s\nprint('ok')\n" % sys.executable)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    result = bridge.run_capped([str(stub)], timeout=5)
+    assert result.returncode == 0
+    assert result.stdout == "ok\n"
+
+
+def test_hostile_loader_env_fails_closed(tmp_path, monkeypatch):
+    # LD_PRELOAD / PYTHONPATH poison hits every child at exec time; the
+    # bridge must still fail closed as BmapError, never crash or hang.
+    monkeypatch.setenv("LD_PRELOAD", "/nonexistent/evil.so")
+    monkeypatch.setenv("PYTHONPATH", "/nonexistent/evil")
+    stub = tmp_path / "bluetoothctl"
+    stub.write_text(
+        "#!%s\nimport sys; sys.stdout.write('x')\n" % sys.executable
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr("pybmap.discovery.BLUETOOTHCTL", str(stub))
+
+    with pytest.raises(BmapError):
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+
+def _wait_for_pid_files(paths, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if all(path.exists() for path in paths):
+            return [int(path.read_text()) for path in paths]
+        time.sleep(0.02)
+    raise AssertionError("child pid files were not created")
+
+
+def _pid_is_running(pid):
+    try:
+        state = Path("/proc/%d/stat" % pid).read_text().split()[2]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+def _wait_for_pids_to_stop(pids, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(_pid_is_running(pid) for pid in pids):
+            return
+        time.sleep(0.02)
+    raise AssertionError("child processes still running: %r" % pids)
+
+
+def _cleanup_processes(proc, pids):
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    for pid in pids:
+        if _pid_is_running(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _sleep_probe(tmp_path):
+    probe = tmp_path / "sleep_probe.py"
+    probe.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    return probe
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process lifecycle")
+def test_sigterm_forwards_to_all_concurrent_children(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    probe = _sleep_probe(tmp_path)
+    pid_files = [tmp_path / ("child-%d.pid" % index) for index in range(3)]
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import concurrent.futures, sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "def run(path):\n"
+        + "    subproc.run_capped([sys.executable, %r, path], timeout=60)\n"
+        % str(probe)
+        + "with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:\n"
+        + "    list(pool.map(run, sys.argv[1:]))\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), *map(str, pid_files)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    pids = []
+    try:
+        pids = _wait_for_pid_files(pid_files)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-death signal")
+def test_child_dies_when_bridge_is_sigkilled(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    probe = _sleep_probe(tmp_path)
+    pid_file = tmp_path / "child.pid"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.run_capped([sys.executable, %r, %r], timeout=60)\n"
+        % (str(probe), str(pid_file))
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    pids = []
+    try:
+        pids = _wait_for_pid_files([pid_file])
+        proc.kill()
+        assert proc.wait(timeout=10) == -signal.SIGKILL
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX process groups")
+def test_sigterm_kills_descendants_in_child_process_group(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    direct_pid = tmp_path / "direct.pid"
+    nested_pid = tmp_path / "nested.pid"
+    probe = tmp_path / "tree_probe.py"
+    probe.write_text(
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import os,sys,time; from pathlib import Path; "
+        "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)', "
+        "sys.argv[2]])\n"
+        "time.sleep(60)\n"
+    )
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "subproc.run_capped([sys.executable, %r, %r, %r], timeout=60)\n"
+        % (str(probe), str(direct_pid), str(nested_pid))
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    pids = []
+    try:
+        pids = _wait_for_pid_files([direct_pid, nested_pid])
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-death signal")
+def test_spawn_registration_window_cannot_orphan_child(tmp_path):
+    python_dir = Path(__file__).resolve().parent.parent / "bosectl" / "python"
+    probe = _sleep_probe(tmp_path)
+    pid_file = tmp_path / "child.pid"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys, time\n"
+        "sys.path.insert(0, %r)\n" % str(python_dir)
+        + "from pybmap import subproc\n"
+        + "real_popen = subproc.subprocess.Popen\n"
+        + "def delayed_popen(*args, **kwargs):\n"
+        + "    child = real_popen(*args, **kwargs)\n"
+        + "    time.sleep(60)\n"
+        + "    return child\n"
+        + "subproc.subprocess.Popen = delayed_popen\n"
+        + "subproc.install_terminate_forwarding()\n"
+        + "subproc.run_capped([sys.executable, %r, %r], timeout=60)\n"
+        % (str(probe), str(pid_file))
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    pids = []
+    try:
+        pids = _wait_for_pid_files([pid_file])
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        _wait_for_pids_to_stop(pids)
+    finally:
+        _cleanup_processes(proc, pids)
+
+
+def test_active_children_cleared_after_run():
+    subproc.run_capped(
+        [sys.executable, "-c", "print('hi')"], timeout=10
+    )
+    assert subproc._active_children == set()
+
+
+def test_main_does_not_replace_callers_sigterm_handler(monkeypatch, capsys):
+    previous = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(bridge, "scan_bose_devices", lambda: [])
+
+    assert bridge.main(["scan"]) == 0
+    capsys.readouterr()
+
+    assert signal.getsignal(signal.SIGTERM) is previous
+
+
+@pytest.mark.skipif(shutil.which("qs") is None, reason="requires Quickshell")
+def test_quickshell_process_clears_environment():
+    fixture = Path(__file__).with_name("process_environment.qml")
+
+    result = subprocess.run(
+        ["qs", "--no-color", "--path", str(fixture)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert "RESULT pass" in result.stdout + result.stderr
+
+
+def test_resolve_device_truncates_hostile_error_detail(monkeypatch):
+    def hostile(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="E" * 5000)
+
+    monkeypatch.setattr(bridge, "run_capped", hostile)
+
+    with pytest.raises(BmapError) as caught:
+        bridge.resolve_device("AA:BB:CC:DD:EE:FF")
+
+    assert len(str(caught.value)) <= bridge.ERROR_DETAIL_LIMIT
+
+
+def test_emit_json_prints_small_payloads(capsys):
+    bridge.emit_json({"schemaVersion": 1})
+
+    assert json.loads(capsys.readouterr().out) == {"schemaVersion": 1}
+
+
+def test_emit_json_refuses_huge_payloads():
+    with pytest.raises(BmapError, match="exceeded"):
+        bridge.emit_json({"devices": ["D" * 100000]})
+
+
+def test_emit_json_cap_includes_trailing_newline(monkeypatch, capsys):
+    payload = {"schemaVersion": 1, "padding": "x"}
+    wire = json.dumps(payload, separators=(",", ":")) + "\n"
+    monkeypatch.setattr(bridge, "OUTPUT_CAP_BYTES", len(wire.encode("utf-8")))
+
+    bridge.emit_json(payload)
+    assert capsys.readouterr().out == wire
+
+    monkeypatch.setattr(bridge, "OUTPUT_CAP_BYTES", len(wire.encode("utf-8")) - 1)
+    with pytest.raises(BmapError, match="exceeded"):
+        bridge.emit_json(payload)
+
+
+def test_main_caps_all_error_output(monkeypatch, capsys):
+    monkeypatch.setattr(
+        bridge,
+        "scan_bose_devices",
+        lambda: (_ for _ in ()).throw(BmapError("😀" * 10000)),
+    )
+
+    assert bridge.main(["scan"]) == 1
+    error = capsys.readouterr().err
+    assert len(error.encode("utf-8")) <= bridge.ERROR_OUTPUT_CAP_BYTES
+    assert error.endswith("\n")
+
+
+def test_scan_fails_closed_on_huge_device_list(monkeypatch, capsys):
+    monkeypatch.setattr(
+        bridge,
+        "scan_bose_devices",
+        lambda: [
+            {"address": "AA:BB:CC:DD:EE:%02X" % i, "name": "D" * 500}
+            for i in range(500)
+        ],
+    )
+
+    assert bridge.main(["scan"]) == 1
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize(
@@ -535,3 +856,278 @@ def test_scan_commands_emit_versioned_device_list(monkeypatch, capsys, command):
             }
         ],
     }
+
+
+def _selection_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _selection_path(home):
+    return home / ".local" / "state" / "omarchy" / "omabose.json"
+
+
+def test_selection_load_missing_is_empty(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_roundtrip_creates_parents_and_locks_mode(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+
+    bridge.selection_save("aa:bb:cc:dd:ee:ff")
+    path = _selection_path(home)
+    assert path.read_text() == '{\n  "selectedAddress": "AA:BB:CC:DD:EE:FF"\n}\n'
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:FF"}
+
+    bridge.selection_save("")
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_oversized(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).write_text('{"selectedAddress": "' + "A" * 5000 + '"}')
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_symlink(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    target = tmp_path / "target.json"
+    target.write_text('{"selectedAddress": "AA:BB:CC:DD:EE:01"}')
+    _selection_path(home).symlink_to(target)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    assert json.loads(target.read_text())["selectedAddress"] == "AA:BB:CC:DD:EE:01"
+
+
+def test_selection_load_rejects_nonregular_and_unparsable(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).mkdir()
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).rmdir()
+    _selection_path(home).write_text("not json{")
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).write_text('{"selectedAddress": "bogus"}')
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    _selection_path(home).write_text('{"other": 1}')
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+@pytest.mark.parametrize("payload", ["[1]", '"text"', "true", "42"])
+def test_selection_load_rejects_nonobject_json(tmp_path, monkeypatch, payload):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    _selection_path(home).write_text(payload)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_fifo_without_blocking(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    os.mkfifo(_selection_path(home))
+
+    start = time.monotonic()
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    assert time.monotonic() - start < 1
+
+
+def test_selection_load_rejects_foreign_owner(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:01"}
+
+    real_uid = os.getuid()
+    monkeypatch.setattr(bridge.os, "getuid", lambda: real_uid + 1)
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_load_rejects_group_or_world_writable_state(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    _selection_path(home).chmod(0o666)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+
+
+def test_selection_rejects_symlinked_parent_directory(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    redirected = tmp_path / "redirected"
+    victim = redirected / "state" / "omarchy" / "omabose.json"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("precious")
+    (home / ".local").symlink_to(redirected, target_is_directory=True)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    with pytest.raises(OSError):
+        bridge.selection_save("AA:BB:CC:DD:EE:01")
+    assert victim.read_text() == "precious"
+
+
+def test_selection_rejects_insecure_parent_permissions(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    _selection_path(home).parent.chmod(0o777)
+
+    assert bridge.selection_load() == {"selectedAddress": ""}
+    with pytest.raises(PermissionError):
+        bridge.selection_save("AA:BB:CC:DD:EE:02")
+
+
+def test_selection_save_rejects_bad_mac(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+
+    with pytest.raises(BmapError, match="Invalid Bluetooth address"):
+        bridge.selection_save("not-a-mac")
+    assert not _selection_path(home).exists()
+
+
+def test_selection_save_replaces_symlink_without_following(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    _selection_path(home).parent.mkdir(parents=True)
+    target = tmp_path / "victim.json"
+    target.write_text("precious")
+    _selection_path(home).symlink_to(target)
+
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+
+    assert target.read_text() == "precious"
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:01"}
+
+
+def test_selection_save_fsyncs_containing_directory(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:01")
+    synced_types = []
+    real_fsync = os.fsync
+
+    def track_fsync(fd):
+        synced_types.append(stat.S_IFMT(os.fstat(fd).st_mode))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(bridge.os, "fsync", track_fsync)
+    bridge.selection_save("AA:BB:CC:DD:EE:02")
+
+    assert stat.S_IFREG in synced_types
+    assert stat.S_IFDIR in synced_types
+
+
+def test_selection_commands_end_to_end(tmp_path, monkeypatch, capsys):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.main(["selection-load"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"selectedAddress": ""}
+    assert bridge.main(["selection-save", "--mac", "AA:BB:CC:DD:EE:01"]) == 0
+    assert bridge.main(["selection-save", "--mac", "nope"]) == 1
+    assert bridge.main(["selection-load"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "selectedAddress": "AA:BB:CC:DD:EE:01"
+    }
+
+
+def test_selection_save_accepts_top_level_mac_option(tmp_path, monkeypatch):
+    _selection_home(tmp_path, monkeypatch)
+
+    assert bridge.main([
+        "--mac", "AA:BB:CC:DD:EE:02", "selection-save"
+    ]) == 0
+    assert bridge.selection_load() == {"selectedAddress": "AA:BB:CC:DD:EE:02"}
+
+
+def test_isolated_selection_command_uses_allowlisted_home(tmp_path):
+    home = tmp_path / "custom-home"
+    home.mkdir()
+
+    result = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            str(Path(bridge.__file__)),
+            "selection-save",
+            "--mac",
+            "AA:BB:CC:DD:EE:03",
+        ],
+        env={"HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(_selection_path(home).read_text()) == {
+        "selectedAddress": "AA:BB:CC:DD:EE:03"
+    }
+
+
+@pytest.mark.skipif(shutil.which("qs") is None, reason="requires Quickshell")
+def test_service_loads_selection_from_allowlisted_home(tmp_path, monkeypatch):
+    home = _selection_home(tmp_path, monkeypatch)
+    bridge.selection_save("AA:BB:CC:DD:EE:03")
+    fixture = Path(__file__).with_name("service_selection.qml")
+    config = tmp_path / "quickshell-config"
+    config.mkdir()
+    shutil.copy(fixture, config / "shell.qml")
+    shutil.copy(Path(bridge.__file__).with_name("Service.qml"), config)
+    shutil.copy(Path(bridge.__file__).with_name("Model.js"), config)
+    (config / "bridge.py").symlink_to(Path(bridge.__file__))
+    environment = os.environ.copy()
+    environment["HOME"] = str(home)
+
+    result = subprocess.run(
+        ["qs", "--no-color", "--path", str(config)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert "RESULT selection AA:BB:CC:DD:EE:03" in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_selection_save_sigterm_removes_temporary_file(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    ready = tmp_path / "ready"
+    driver = tmp_path / "selection_driver.py"
+    driver.write_text(
+        "import os, signal, stat, sys, time\n"
+        "from pathlib import Path\n"
+        "os.environ['HOME'] = %r\n" % str(home)
+        + "sys.path.insert(0, %r)\n" % str(Path(bridge.__file__).parent)
+        + "import bridge\n"
+        + "real_fsync = bridge.os.fsync\n"
+        + "def slow_fsync(fd):\n"
+        + "    if stat.S_ISREG(os.fstat(fd).st_mode):\n"
+        + "        Path(%r).write_text('ready')\n" % str(ready)
+        + "        time.sleep(60)\n"
+        + "    return real_fsync(fd)\n"
+        + "bridge.os.fsync = slow_fsync\n"
+        + "raise SystemExit(bridge.main([\n"
+        + "    'selection-save', '--mac', 'AA:BB:CC:DD:EE:04'\n"
+        + "], install_signal_handlers=True))\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(driver)])
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        assert ready.exists(), "selection save never reached fsync"
+
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        state_dir = _selection_path(home).parent
+        assert list(state_dir.glob(".omabose-*.tmp")) == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

@@ -2,8 +2,13 @@
 """Small machine-readable adapter between the Omarchy panel and pybmap."""
 
 import argparse
+import errno
 import json
+import os
 import re
+import secrets
+import signal
+import stat
 import subprocess
 import sys
 import time
@@ -21,10 +26,208 @@ from pybmap.discovery import (
     list_bmap_devices,
 )
 from pybmap.errors import BmapConnectionError, BmapError
+from pybmap.subproc import (
+    OutputTooLarge,
+    install_terminate_forwarding,
+    run_capped,
+)
 
 
 SCHEMA_VERSION = 1
+# Producer-side cap for everything this bridge prints: the panel buffers
+# child output to end-of-stream, so the bridge itself must guarantee small
+# output rather than trusting it. Real payloads are a few KiB; anything past
+# the cap fails closed instead of reaching the panel's JSON parser.
+OUTPUT_CAP_BYTES = 65536
+# Errors are rendered as short UI labels. Bound the wire form separately so
+# every exception path is safe for the panel's streaming collector.
+ERROR_OUTPUT_CAP_BYTES = 2048
+# bluetoothctl stderr on failure is device-influenced free text echoed into
+# our one-line errors: keep the gist, drop the rest.
+ERROR_DETAIL_LIMIT = 500
+# The persisted selection is one tiny JSON document; anything bigger is not
+# ours. All checks below run against the opened fd (never a re-looked-up
+# path), so a swap between check and use cannot redirect them.
+SELECTION_MAX_BYTES = 4096
+SELECTION_DIRECTORY_PARTS = (".local", "state", "omarchy")
+SELECTION_FILENAME = "omabose.json"
+UNSAFE_WRITE_BITS = stat.S_IWGRP | stat.S_IWOTH
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def selection_path():
+    """Where the panel persists the explicitly selected device address."""
+    return Path.home().joinpath(*SELECTION_DIRECTORY_PARTS, SELECTION_FILENAME)
+
+
+def _validate_selection_directory(fd, name):
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & UNSAFE_WRITE_BITS
+    ):
+        raise PermissionError(errno.EPERM, "Unsafe selection directory", name)
+
+
+def _open_selection_directory(create):
+    """Open the state directory without following application-path symlinks."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    current = os.open(Path.home(), flags)
+    try:
+        _validate_selection_directory(current, str(Path.home()))
+        for part in SELECTION_DIRECTORY_PARTS:
+            try:
+                child = os.open(part, flags | os.O_NOFOLLOW, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current)
+                    os.fsync(current)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags | os.O_NOFOLLOW, dir_fd=current)
+            try:
+                _validate_selection_directory(child, part)
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def selection_load():
+    """Read the persisted selection, degrading to empty on any problem.
+
+    Missing, oversized, non-regular, foreign-owned, symlinked, or
+    unparsable state all mean the same thing: no usable preference.
+    Returns {"selectedAddress": mac-or-""}.
+    """
+    try:
+        directory_fd = _open_selection_directory(create=False)
+    except OSError:
+        return {"selectedAddress": ""}
+    try:
+        try:
+            fd = os.open(
+                SELECTION_FILENAME,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=directory_fd,
+            )
+        except OSError:
+            return {"selectedAddress": ""}
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & UNSAFE_WRITE_BITS
+                or info.st_size > SELECTION_MAX_BYTES
+            ):
+                return {"selectedAddress": ""}
+            raw = bytearray()
+            while len(raw) <= SELECTION_MAX_BYTES:
+                piece = os.read(fd, SELECTION_MAX_BYTES + 1 - len(raw))
+                if not piece:
+                    break
+                raw.extend(piece)
+        except OSError:
+            return {"selectedAddress": ""}
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+    if len(raw) > SELECTION_MAX_BYTES:
+        return {"selectedAddress": ""}
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        return {"selectedAddress": ""}
+    if not isinstance(obj, dict):
+        return {"selectedAddress": ""}
+    addr = str(obj.get("selectedAddress") or "").upper()
+    return {"selectedAddress": addr if MAC_RE.fullmatch(addr) else ""}
+
+
+def selection_save(mac):
+    """Persist the explicitly selected device address, atomically.
+
+    Empty mac clears the preference. Refuses anything that is not a MAC
+    (raising, for the CLI caller to report).
+    Writes to a fresh O_EXCL temp file (0600) and renames over the state
+    path, so a pre-existing symlink is replaced rather than followed and
+    a partial write can never be observed.
+    """
+    if mac and not MAC_RE.fullmatch(mac):
+        raise BmapError("Invalid Bluetooth address")
+    payload = {"selectedAddress": mac.upper()} if mac else {}
+    # Same shape the panel historically wrote, so existing state keeps
+    # working byte for byte.
+    text = json.dumps(payload, indent=2) + "\n"
+    data = text.encode("utf-8")
+    directory_fd = _open_selection_directory(create=True)
+    fd = None
+    tmp_name = None
+    try:
+        for _attempt in range(16):
+            candidate = ".omabose-%s.tmp" % secrets.token_hex(8)
+            tmp_name = candidate
+            try:
+                fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                    mode=0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                tmp_name = None
+                continue
+        if fd is None:
+            raise FileExistsError("Could not create selection temporary file")
+
+        written = 0
+        while written < len(data):
+            count = os.write(fd, data[written:])
+            if count == 0:
+                raise OSError(errno.EIO, "Selection write made no progress")
+            written += count
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(
+            tmp_name,
+            SELECTION_FILENAME,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        tmp_name = None
+        os.fsync(directory_fd)
+    except BaseException:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(directory_fd)
+
+
+def _exit_cleanly_on_terminate(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 CONNECTION_RETRY_DELAYS = (0.5, 1.0, 1.5)
 EQ_BANDS = (
     (0, "bass", "Bass"),
@@ -47,20 +250,19 @@ def resolve_device(mac):
         raise BmapError("bluetoothctl is required")
 
     try:
-        result = subprocess.run(
-            [exe, "info", mac],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        # Bounded: `info` echoes device-set fields, so the child must not be
+        # able to grow our buffers without limit (see pybmap.subproc).
+        result = run_capped([exe, "info", mac], timeout=5)
     except FileNotFoundError as error:
         raise BmapError("bluetoothctl is required") from error
     except subprocess.TimeoutExpired as error:
         raise BmapError("Timed out reading the Bluetooth device") from error
+    except OutputTooLarge as error:
+        raise BmapError("Bluetooth device returned too much data") from error
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        raise BmapError(detail or "Bluetooth device was not found")
+        raise BmapError((detail[:ERROR_DETAIL_LIMIT] or "Bluetooth device was not found"))
 
     info = result.stdout
     if not has_bmap(info):
@@ -81,6 +283,32 @@ def safe_read(operation, fallback):
         return operation()
     except BmapError:
         return fallback
+
+
+def emit_json(payload):
+    """Print one JSON document, refusing to emit past the output cap.
+
+    Raises BmapError instead, which main turns into a one-line stderr error
+    and a nonzero exit -- the panel then keeps its previous state rather
+    than parsing an unbounded document.
+    """
+    text = json.dumps(payload, separators=(",", ":")) + "\n"
+    if len(text.encode("utf-8")) > OUTPUT_CAP_BYTES:
+        raise BmapError(
+            "Bridge output exceeded %d bytes" % OUTPUT_CAP_BYTES
+        )
+    sys.stdout.write(text)
+
+
+def emit_error(error):
+    """Write one UTF-8 error line without exceeding the stderr cap."""
+    prefix = "Omabose: "
+    suffix = "\n"
+    available = ERROR_OUTPUT_CAP_BYTES - len((prefix + suffix).encode("utf-8"))
+    detail = str(error).encode("utf-8", "replace")[:available].decode(
+        "utf-8", "ignore"
+    )
+    sys.stderr.write(prefix + detail + suffix)
 
 
 def connect_device(mac, device_type):
@@ -306,25 +534,41 @@ def argument_parser():
     # "scan" is the name the panel invokes; "list" is an alias for shell use.
     commands.add_parser("scan")
     commands.add_parser("list")
+    commands.add_parser("selection-load")
+    save = commands.add_parser("selection-save")
+    save.add_argument(
+        "--mac",
+        required=False,
+        default=argparse.SUPPRESS,
+        help="selected Bluetooth address (omit to clear the preference)",
+    )
     return parser
 
 
-def main(argv=None):
+def main(argv=None, *, install_signal_handlers=False):
     args = argument_parser().parse_args(argv)
+    if install_signal_handlers:
+        if args.command == "selection-save":
+            signal.signal(signal.SIGTERM, _exit_cleanly_on_terminate)
+        elif args.command != "selection-load":
+            install_terminate_forwarding()
     try:
         if args.command in ("scan", "list"):
             devices = scan_bose_devices()
-            print(json.dumps(
-                {"schemaVersion": SCHEMA_VERSION, "devices": devices},
-                separators=(",", ":"),
-            ))
+            emit_json({"schemaVersion": SCHEMA_VERSION, "devices": devices})
+            return 0
+        if args.command == "selection-load":
+            emit_json(selection_load())
+            return 0
+        if args.command == "selection-save":
+            selection_save(args.mac or "")
             return 0
         if not args.mac or not MAC_RE.fullmatch(args.mac):
             raise BmapError("Invalid Bluetooth address")
         identity = resolve_device(args.mac)
         with connect_device(args.mac, identity.config) as device:
             if args.command == "status":
-                print(json.dumps(panel_status(device, identity, args.mac), separators=(",", ":")))
+                emit_json(panel_status(device, identity, args.mac))
             elif args.command == "mode":
                 set_mode(device, args.name)
             elif args.command == "cnc":
@@ -332,10 +576,10 @@ def main(argv=None):
             elif args.command == "eq":
                 set_equalizer(device, args.bass, args.mid, args.treble)
     except (BmapError, OSError, ValueError, TypeError) as error:
-        print("Omabose: %s" % error, file=sys.stderr)
+        emit_error(error)
         return 1
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(install_signal_handlers=True))

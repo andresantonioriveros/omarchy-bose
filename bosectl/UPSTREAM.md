@@ -33,3 +33,16 @@ with `bluetoothctl_path()`): the panel path never resolves executables via
 shadow binary cannot be picked up by the long-lived shell. The original MIT
 license is included in this directory. The runtime has no third-party
 dependencies beyond Python 3 and the system Bluetooth stack.
+
+Local addition on top of the vendored copy: `python/pybmap/subproc.py`
+(`run_capped`), used by `discovery.py`, `cli.py`, and the repository-root
+`bridge.py`. `bluetoothctl` echoes device-set fields, so its output is
+untrusted: the helper retains at most 64 KiB across stdout/stderr combined,
+kills the child past the cap, and preserves timeout and fail-closed behavior
+it replaces. Undecodable bytes degrade to U+FFFD instead of raising. The
+module also tracks every in-flight process group and offers
+`install_terminate_forwarding()`, which the bridge installs at startup so
+its SIGTERM kills concurrent `bluetoothctl` children instead of orphaning
+them. On Linux, `_exec.py` sets a parent-death signal before replacing itself
+with the command, covering abrupt bridge death and the spawn-registration
+window as well.

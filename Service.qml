@@ -12,8 +12,7 @@ Item {
   readonly property var rawDevices: Bluetooth.devices ? Bluetooth.devices.values : []
 
   property var discoveredBoseAddresses: []
-  property string discoveryOutput: ""
-  property string discoveryError: ""
+  property var discoveryCapture: Model.emptyProcessOutput()
   property bool discoveryQueued: false
 
   readonly property var boseDevices: Model.boseDeviceRows(rawDevices, discoveredBoseAddresses)
@@ -28,16 +27,19 @@ Item {
   property int pendingVerificationAttempts: 0
   property string vendorError: ""
   property string actionStatus: ""
-  property string statusOutput: ""
-  property string statusError: ""
-  property string actionOutput: ""
-  property string actionError: ""
+  property var statusCapture: Model.emptyProcessOutput()
+  property var actionCapture: Model.emptyProcessOutput()
+  property var selectionLoadCapture: Model.emptyProcessOutput()
   property bool statusTimedOut: false
   property bool actionTimedOut: false
+  property bool selectionLoadTimedOut: false
+  property bool selectionSaveTimedOut: false
 
-  readonly property string selectionPath: Quickshell.env("HOME") + "/.local/state/omarchy/omabose.json"
   property bool selectionLoaded: false
   property string preferredAddress: ""
+  property string selectionPersistedAddress: ""
+  property string selectionSavingAddress: ""
+  property int selectionSaveAttempts: 0
 
   readonly property var connectedDevices: boseDevices.filter(function(device) { return device.connected })
   readonly property var selectedDevice: Model.deviceForAddress(boseDevices, selectedAddress)
@@ -69,6 +71,7 @@ Item {
   readonly property bool eqAvailable: vendorMatchesSelection && vendorStatus.eqAvailable
   readonly property string bridgePath: decodeURIComponent(
     Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//, ""))
+  readonly property string stateHome: Quickshell.env("HOME")
   readonly property int pollIntervalMs: {
     var seconds = Number(setting("pollIntervalSec", 15))
     if (!isFinite(seconds)) seconds = 15
@@ -81,10 +84,15 @@ Item {
       return
     }
     discoveryQueued = false
-    discoveryOutput = ""
-    discoveryError = ""
-    discoveryProcess.command = ["/usr/bin/python3", bridgePath, "scan"]
+    discoveryCapture = Model.emptyProcessOutput()
+    discoveryProcess.command = ["/usr/bin/python3", "-I", bridgePath, "scan"]
     discoveryProcess.running = true
+  }
+
+  function captureOutput(capture, process, value, isStderr) {
+    var next = Model.appendProcessOutput(capture, value, isStderr)
+    if (next.exceeded && !capture.exceeded) process.running = false
+    return next
   }
 
   function setting(name, fallback) {
@@ -109,14 +117,30 @@ Item {
     if (selectionLoaded) return
     var addr = parsePersistedAddress(raw)
     preferredAddress = addr
+    selectionPersistedAddress = addr
     selectionLoaded = true
     reconcileDevices()
   }
 
+  function runSelectionLoad() {
+    if (selectionLoadProcess.running) return
+    selectionLoadCapture = Model.emptyProcessOutput()
+    selectionLoadTimedOut = false
+    selectionLoadProcess.command = [
+      "/usr/bin/python3", "-I", bridgePath, "selection-load"
+    ]
+    selectionLoadProcess.running = true
+  }
+
   function flushSelection() {
-    if (!selectionLoaded) return
-    var payload = preferredAddress ? { selectedAddress: preferredAddress.toUpperCase() } : {}
-    selectionFile.setText(JSON.stringify(payload, null, 2) + "\n")
+    if (!selectionLoaded || selectionSaveProcess.running
+        || preferredAddress === selectionPersistedAddress) return
+    var args = ["selection-save"]
+    if (preferredAddress) args.push("--mac", preferredAddress.toUpperCase())
+    selectionSavingAddress = preferredAddress
+    selectionSaveTimedOut = false
+    selectionSaveProcess.command = ["/usr/bin/python3", "-I", bridgePath].concat(args)
+    selectionSaveProcess.running = true
   }
 
   function reconcileDevices() {
@@ -139,6 +163,7 @@ Item {
   function select(address) {
     var selected = findDevice(address)
     if (!selected) return
+    if (preferredAddress !== selected.address) selectionSaveAttempts = 0
     preferredAddress = selected.address
     if (selectionLoaded) selectionSaveTimer.restart()
     if (selected.address !== selectedAddress) selectedAddress = selected.address
@@ -146,7 +171,7 @@ Item {
 
   function command(args) {
     if (!selectedDevice || !selectedDevice.connected) return []
-    return ["/usr/bin/python3", bridgePath, "--mac", selectedDevice.address].concat(args)
+    return ["/usr/bin/python3", "-I", bridgePath, "--mac", selectedDevice.address].concat(args)
   }
 
   function clearPending() {
@@ -196,8 +221,7 @@ Item {
     refreshQueued = false
     vendorState = vendorAvailable ? vendorState : "loading"
     vendorError = ""
-    statusOutput = ""
-    statusError = ""
+    statusCapture = Model.emptyProcessOutput()
     statusTimedOut = false
     statusRequestAddress = selectedDevice.address
     statusRequestGeneration = vendorGeneration
@@ -215,8 +239,7 @@ Item {
     }
     actionStatus = ""
     vendorError = ""
-    actionOutput = ""
-    actionError = ""
+    actionCapture = Model.emptyProcessOutput()
     actionTimedOut = false
     actionSuccessText = successText
     actionRequestAddress = selectedDevice.address
@@ -345,9 +368,31 @@ Item {
 
   Timer {
     id: selectionSaveTimer
-    interval: 250
+    interval: root.selectionSaveAttempts === 0
+      ? 250 : Math.min(4000, 500 * Math.pow(2, root.selectionSaveAttempts - 1))
     repeat: false
     onTriggered: root.flushSelection()
+  }
+
+  Timer {
+    interval: 5000
+    repeat: false
+    running: selectionLoadProcess.running
+    onTriggered: {
+      root.selectionLoadTimedOut = true
+      selectionLoadProcess.running = false
+      root.loadSelection("")
+    }
+  }
+
+  Timer {
+    interval: 5000
+    repeat: false
+    running: selectionSaveProcess.running
+    onTriggered: {
+      root.selectionSaveTimedOut = true
+      selectionSaveProcess.running = false
+    }
   }
 
   Timer {
@@ -377,34 +422,81 @@ Item {
     onTriggered: discoveryProcess.running = false
   }
 
-  FileView {
-    id: selectionFile
-    path: root.selectionPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.loadSelection(text())
-    onLoadFailed: root.loadSelection("")
+  // Selection persistence lives in the bridge, where the path itself can
+  // be validated (regular file, owned by us, no symlinks, size-capped)
+  // instead of trusting FileView blindly. Load always succeeds with a
+  // (possibly empty) document; save fails loudly on invalid input.
+  Process {
+    id: selectionLoadProcess
+    clearEnvironment: true
+    environment: ({ HOME: root.stateHome })
+    command: []
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.selectionLoadCapture = root.captureOutput(
+          root.selectionLoadCapture, selectionLoadProcess, value, false)
+      }
+    }
+    onExited: function(exitCode) {
+      root.loadSelection(
+        exitCode === 0
+          && !root.selectionLoadTimedOut
+          && !root.selectionLoadCapture.exceeded
+        ? root.selectionLoadCapture.stdout : "")
+    }
   }
 
   Process {
-    id: discoveryProcess
+    id: selectionSaveProcess
+    clearEnvironment: true
+    environment: ({ HOME: root.stateHome })
     command: []
-    stdout: StdioCollector {
-      id: discoveryStdout
-      waitForEnd: true
-      onStreamFinished: root.discoveryOutput = text
+    onExited: function(exitCode) {
+      var submitted = root.selectionSavingAddress
+      var result = Model.selectionSaveCompleted(
+        root.preferredAddress,
+        root.selectionPersistedAddress,
+        submitted,
+        root.selectionSaveAttempts,
+        exitCode === 0 && !root.selectionSaveTimedOut)
+      root.selectionSavingAddress = ""
+      root.selectionPersistedAddress = result.persistedAddress
+      root.selectionSaveAttempts = result.attempts
+      if (result.retry) selectionSaveTimer.restart()
     }
-    stderr: StdioCollector {
-      id: discoveryStderr
-      waitForEnd: true
-      onStreamFinished: root.discoveryError = text
+  }
+
+  // Child processes start in Python isolated mode with a scrubbed environment,
+  // so ambient variables and user-site startup hooks cannot reach the bridge
+  // or bluetoothctl. BlueZ output is decoded as explicit UTF-8.
+  // SplitParser emits chunks without retaining them; Model.appendProcessOutput
+  // keeps at most MAX_JSON_BYTES across both streams.
+  Process {
+    id: discoveryProcess
+    clearEnvironment: true
+    environment: ({})
+    command: []
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.discoveryCapture = root.captureOutput(
+          root.discoveryCapture, discoveryProcess, value, false)
+      }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.discoveryCapture = root.captureOutput(
+          root.discoveryCapture, discoveryProcess, value, true)
+      }
     }
     onExited: function(exitCode) {
-      var output = String(discoveryStdout.text || root.discoveryOutput || "")
-      if (exitCode === 0) {
-        var addrs = Model.parseDiscoveryAddresses(output)
-        if (!Model.sameAddresses(addrs, root.discoveredBoseAddresses))
+      var capture = root.discoveryCapture
+      if (exitCode === 0 && !capture.exceeded) {
+        var addrs = Model.parseDiscoveryAddresses(capture.stdout)
+        if (addrs !== null
+            && !Model.sameAddresses(addrs, root.discoveredBoseAddresses))
           root.discoveredBoseAddresses = addrs
       }
       // On failure or timeout the previous allowlist stays in place and the
@@ -416,20 +508,27 @@ Item {
 
   Process {
     id: statusProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
-    stdout: StdioCollector {
-      id: statusStdout
-      waitForEnd: true
-      onStreamFinished: root.statusOutput = text
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.statusCapture = root.captureOutput(
+          root.statusCapture, statusProcess, value, false)
+      }
     }
-    stderr: StdioCollector {
-      id: statusStderr
-      waitForEnd: true
-      onStreamFinished: root.statusError = text
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.statusCapture = root.captureOutput(
+          root.statusCapture, statusProcess, value, true)
+      }
     }
     onExited: function(exitCode) {
-      var output = String(statusStdout.text || root.statusOutput || "")
-      var error = String(statusStderr.text || root.statusError || "")
+      var capture = root.statusCapture
+      var output = capture.stdout
+      var error = capture.stderr
       var selected = root.selectedDevice
       if (root.statusRequestGeneration !== root.vendorGeneration
           || !root.active || !selected || !selected.connected
@@ -439,7 +538,9 @@ Item {
         return
       }
       var failure = ""
-      if (root.statusTimedOut) {
+      if (capture.exceeded) {
+        failure = "Bose status exceeded size limit"
+      } else if (root.statusTimedOut) {
         failure = "Bose status request timed out"
       } else if (exitCode !== 0) {
         failure = Model.errorForProcess(error || output)
@@ -484,23 +585,29 @@ Item {
 
   Process {
     id: actionProcess
+    clearEnvironment: true
+    environment: ({})
     command: []
-    stdout: StdioCollector {
-      id: actionStdout
-      waitForEnd: true
-      onStreamFinished: root.actionOutput = text
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.actionCapture = root.captureOutput(
+          root.actionCapture, actionProcess, value, false)
+      }
     }
-    stderr: StdioCollector {
-      id: actionStderr
-      waitForEnd: true
-      onStreamFinished: root.actionError = text
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(value) {
+        root.actionCapture = root.captureOutput(
+          root.actionCapture, actionProcess, value, true)
+      }
     }
     onExited: function(exitCode) {
       var selected = root.selectedDevice
       if (root.actionRequestGeneration !== root.vendorGeneration
           || !root.active || !selected || !selected.connected
           || root.actionRequestAddress !== selected.address) return
-      if (exitCode === 0) {
+      if (exitCode === 0 && !root.actionCapture.exceeded) {
         root.vendorError = ""
         root.actionStatus = root.actionSuccessText
         root.pendingVerificationAttempts = 0
@@ -508,9 +615,11 @@ Item {
         verificationRefresh.restart()
       } else {
         root.clearPending()
-        var output = String(actionStderr.text || root.actionError || actionStdout.text || root.actionOutput || "")
-        root.vendorError = root.actionTimedOut
-          ? "Bose control request timed out" : Model.errorForProcess(output)
+        var output = root.actionCapture.stderr || root.actionCapture.stdout
+        root.vendorError = root.actionCapture.exceeded
+          ? "Bose control exceeded size limit"
+          : (root.actionTimedOut
+            ? "Bose control request timed out" : Model.errorForProcess(output))
         actionMessageTimer.restart()
         verificationRefresh.restart()
       }
@@ -518,8 +627,19 @@ Item {
   }
 
   Component.onCompleted: {
-    selectionFile.reload()
+    runSelectionLoad()
     reconcileDevices()
     refreshDiscovery()
+  }
+
+  Component.onDestruction: {
+    // Request SIGTERM before teardown. The bridge kills every active child
+    // process group, while its Linux parent-death contract also covers the
+    // immediate SIGKILL Quickshell may issue as the Process is destroyed.
+    if (discoveryProcess.running) discoveryProcess.running = false
+    if (statusProcess.running) statusProcess.running = false
+    if (actionProcess.running) actionProcess.running = false
+    if (selectionLoadProcess.running) selectionLoadProcess.running = false
+    if (selectionSaveProcess.running) selectionSaveProcess.running = false
   }
 }

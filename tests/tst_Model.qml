@@ -285,4 +285,102 @@ TestCase {
   function test_cleanErrorRemovesBridgePrefix() {
     compare(Model.errorForProcess("Omabose: device unavailable\n"), "device unavailable")
   }
+
+  function test_errorForProcessTruncatesHostileDetail() {
+    var hostile = "Omabose: "
+    for (var i = 0; i < 2000; i++) hostile += "E"
+    var shown = Model.errorForProcess(hostile)
+    verify(shown.length <= Model.MAX_ERROR_CHARS)
+    verify(shown.length > 0)
+  }
+
+  function test_errorForProcessDoesNotSplitSurrogatePair() {
+    var hostile = ""
+    for (var i = 0; i < Model.MAX_ERROR_CHARS - 1; i++) hostile += "E"
+    hostile += "😀"
+    var shown = Model.errorForProcess(hostile)
+    compare(shown.length, Model.MAX_ERROR_CHARS - 1)
+    compare(shown, hostile.substring(0, Model.MAX_ERROR_CHARS - 1))
+  }
+
+  function test_parseBridgeStatusRejectsOversizedPayload() {
+    var padding = ""
+    while (padding.length <= Model.MAX_JSON_BYTES) padding += "x"
+    var big = JSON.stringify({ schemaVersion: 1, padding: padding })
+    var threw = false
+    try { Model.parseBridgeStatus(big) } catch (e) {
+      threw = String(e).indexOf("size limit") >= 0
+    }
+    verify(threw)
+  }
+
+  function test_parseBridgeStatusAcceptsExactWireCap() {
+    var base = JSON.stringify({ schemaVersion: 1, padding: "" })
+    var padding = ""
+    for (var i = 0; i < Model.MAX_JSON_BYTES - base.length - 1; i++) padding += "x"
+    var exact = JSON.stringify({ schemaVersion: 1, padding: padding }) + "\n"
+    compare(Model.utf8Length(exact), Model.MAX_JSON_BYTES)
+    verify(Model.parseBridgeStatus(exact) !== null)
+
+    var threw = false
+    try { Model.parseBridgeStatus(exact + " ") } catch (e) {
+      threw = String(e).indexOf("size limit") >= 0
+    }
+    verify(threw)
+  }
+
+  function test_parseDiscoveryAddressesRejectsOversizedPayload() {
+    var padding = ""
+    while (padding.length <= Model.MAX_JSON_BYTES) padding += "x"
+    var big = JSON.stringify({ schemaVersion: 1, devices: [], padding: padding })
+    compare(Model.parseDiscoveryAddresses(big), null)
+  }
+
+  function test_sizeGuardsCountBytesNotCharacters() {
+    // 40000 chars but 80000 UTF-8 bytes: a character count waves it
+    // through at nearly triple the byte cap, so it must still refuse.
+    var wide = ""
+    for (var i = 0; i < 40000; i++) wide += "é"
+    var status = JSON.stringify({ schemaVersion: 1, padding: wide })
+    var discovery = JSON.stringify({ schemaVersion: 1, devices: [], padding: wide })
+    var threw = false
+    try { Model.parseBridgeStatus(status) } catch (e) {
+      threw = String(e).indexOf("size limit") >= 0
+    }
+    verify(threw)
+    compare(Model.parseDiscoveryAddresses(discovery), null)
+  }
+
+  function test_processOutputIsCappedAcrossBothStreams() {
+    var capture = Model.emptyProcessOutput()
+    capture = Model.appendProcessOutput(capture, "out", false)
+    capture = Model.appendProcessOutput(capture, "err", true)
+    compare(capture.stdout, "out")
+    compare(capture.stderr, "err")
+    compare(capture.bytes, 6)
+
+    var wide = ""
+    for (var i = 0; i < Model.MAX_JSON_BYTES / 2; i++) wide += "é"
+    capture = Model.appendProcessOutput(capture, wide, false)
+    verify(capture.exceeded)
+    compare(capture.stdout, "out")
+    compare(capture.stderr, "err")
+  }
+
+  function test_selectionSaveRetriesAddressChangedInFlight() {
+    var result = Model.selectionSaveCompleted(
+      "AA:BB:CC:DD:EE:02", "", "AA:BB:CC:DD:EE:01", 0, true)
+    compare(result.persistedAddress, "AA:BB:CC:DD:EE:01")
+    compare(result.attempts, 0)
+    verify(result.retry)
+  }
+
+  function test_selectionSavePreservesDirtyStateOnFailure() {
+    var result = Model.selectionSaveCompleted(
+      "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:01",
+      "AA:BB:CC:DD:EE:02", 1, false)
+    compare(result.persistedAddress, "AA:BB:CC:DD:EE:01")
+    compare(result.attempts, 2)
+    verify(result.retry)
+  }
 }
